@@ -80,6 +80,11 @@ class PhaseProblem:
                 or np.any(self.target.target < 0) or np.any(self.target.weight < 0)):
             raise ValueError("Target amplitudes and weights must be finite and nonnegative")
         self.target_indices = [_nearest_grid_index(cfg, np.asarray(p)) for p in cfg.targets]
+        self.target_response = (
+            basis.target_response(np.asarray(cfg.targets))
+            if cfg.targets and callable(getattr(basis, "target_response", None))
+            else None
+        )
         self.background_mask = _build_background_mask(
             cfg, np.asarray(cfg.targets), cfg.training.target_radius,
             cfg.training.source_exclusion_layers,
@@ -121,9 +126,12 @@ class PhaseProblem:
 
     def _warm_gpu_pipeline(self):
         field = self.basis.field(self.initial_phases, return_numpy=False)
-        loss, cotangent = self.loss_model.evaluate_device(field)
+        focal = self.focal_field(self.initial_phases, device=True)
+        loss, cotangent = self.loss_model.evaluate_device(field, **self._focal_kwargs(focal))
         self.basis.phase_vjp(cotangent, self.initial_phases, return_numpy=False)
-        self.metrics_device(field)
+        if self._focal_kwargs(focal):
+            self._focal_gradient(self.initial_phases, focal, device=True)
+        self.metrics_device(field, focal)
         if not bool(cp.isfinite(loss)):
             raise FloatingPointError("Non-finite GPU warm-up loss")
         cp.cuda.Stream.null.synchronize()
@@ -157,9 +165,35 @@ class PhaseProblem:
             return float("inf")
         return self.time_budget_seconds - self.elapsed_seconds
 
-    def metrics(self, field):
+    def focal_field(self, phases, device=False):
+        if self.target_response is None:
+            return None
+        xp = cp if device else np
+        if device:
+            if not hasattr(self, "_gpu_target_response"):
+                self._gpu_target_response = cp.asarray(self.target_response)
+            response = self._gpu_target_response
+        else:
+            response = self.target_response
+        return response @ xp.exp(1j * xp.asarray(phases))
+
+    def _focal_kwargs(self, focal):
+        if focal is not None and self.cfg.training.loss_type != "field_match":
+            return {"focal_field": focal}
+        return {}
+
+    def _focal_gradient(self, phases, focal, device=False):
+        xp = cp if device else np
+        response = self._gpu_target_response if device else self.target_response
+        cotangent = (-self.loss_model.target_weight / len(focal)
+                     * focal / (xp.abs(focal) + self.loss_model.eps))
+        adjoint = response.conj().T @ cotangent
+        return xp.real(adjoint.conj() * 1j * xp.exp(1j * xp.asarray(phases)))
+
+    def metrics(self, field, focal=None):
         amplitude = np.abs(field)
-        values = np.array([amplitude[i] for i in self.target_indices])
+        values = (np.abs(focal) if focal is not None else
+                  np.array([amplitude[i] for i in self.target_indices]))
         if not values.size:
             values = amplitude[self.target.weight >= np.max(self.target.weight) * 0.5]
         mean, peak = float(np.mean(values)), float(np.max(values))
@@ -177,9 +211,11 @@ class PhaseProblem:
             "field_absolute_l2": error,
         }
 
-    def metrics_device(self, field):
+    def metrics_device(self, field, focal=None):
         amplitude = cp.abs(field)
-        if self.target_indices:
+        if focal is not None:
+            values = cp.abs(focal)
+        elif self.target_indices:
             indices = tuple(np.asarray(self.target_indices, dtype=np.intp).T)
             values = amplitude[indices]
         else:
@@ -244,16 +280,20 @@ class PhaseProblem:
         self.field_evaluations += 1
         use_gpu = getattr(self.basis, "basis_gpu", None) is not None
         field_value = self.basis.field(phases, return_numpy=not use_gpu)
+        focal = self.focal_field(phases, device=use_gpu)
+        focal_kwargs = self._focal_kwargs(focal)
         if use_gpu:
             loss_value, cotangent = self.loss_model.evaluate_device(
                 field_value,
                 with_cotangent=gradient,
+                **focal_kwargs,
             )
             loss = float(loss_value)
         else:
             loss, cotangent = self.loss_model.evaluate(
                 field_value,
                 with_cotangent=gradient,
+                **focal_kwargs,
             )
         if not np.isfinite(loss) or (
             use_gpu and not bool(cp.isfinite(field_value).all())
@@ -267,9 +307,13 @@ class PhaseProblem:
                 phases,
                 return_numpy=True,
             )
+            if focal_kwargs:
+                extra = self._focal_gradient(phases, focal, device=use_gpu)
+                grad += cp.asnumpy(extra) if use_gpu else extra
             if not np.isfinite(grad).all():
                 raise FloatingPointError("Non-finite phase gradient")
-        metrics = self.metrics_device(field_value) if use_gpu else self.metrics(field_value)
+        metrics = (self.metrics_device(field_value, focal) if use_gpu else
+                   self.metrics(field_value, focal))
         evaluation = Evaluation(
             phases.copy(),
             loss,
@@ -312,6 +356,18 @@ class PhaseProblem:
     def result(self, final, reason, **metadata):
         if final is None or self.best is None:
             raise RuntimeError("Algorithm returned no evaluated candidate")
+        # Amplitude objectives do not fix global phase. For an optimized single
+        # exact target, choose a real-positive focus before export/quantization.
+        # This rotates all channels equally; relative phases are untouched.
+        if (self.target_response is not None and len(self.target_response) == 1
+                and self.cfg.training.loss_type != "field_match"
+                and self.cfg.algorithm in {"adjoint", "response_alignment"}):
+            for value in {id(final): final, id(self.best): self.best}.values():
+                offset = float(np.angle(self.focal_field(value.phases)[0]))
+                value.phases = wrap(value.phases - offset)
+                if value.field is not None:
+                    value.field = value.field * np.exp(-1j * offset)
+            metadata["global_phase_convention"] = "real_positive_exact_target"
         if final.field is None:
             final.field = self.basis.field(final.phases, return_numpy=True)
         if self.best.field is None:

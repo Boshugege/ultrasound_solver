@@ -1,0 +1,18 @@
+schema_version: 1
+name: "sonicsurface-local"
+
+serial:
+  port: "COM4"
+  baudrate: 230400
+
+# sonicsurface: 使用官方 SonicSurface.py 提供的 16x16 网格到 FPGA 通道映射。
+# identity: 输入数组下标直接对应 FPGA 通道。也可填写 0..255 的自定义完整排列。
+channel_order: "sonicsurface"
+
+calibration:
+  # firmware: 校正已写入 FPGA；host: 服务端发送前加入 phase_corrections_bins。
+  mode: "firmware"
+  phase_corrections_bins: "zeros"
+
+  # 实机发送前，必须在确认通道映射与校正方式后改为 true。
+  verified: true

@@ -1,0 +1,55 @@
+# Validated homogeneous free-field PDE used by the control phase optimizer.
+# Physical coordinates remain board coordinates; domain.origin_m expands the
+# domain around the complete 166.5 mm SonicSurface reference aperture.
+mode: phase_optimization
+algorithm: adjoint
+algorithm_options:
+  optimizer: lbfgsb
+physics:
+  sound_speed: 346.0
+  medium_density: 1.21
+transducer_specs:
+  frequency: 40000.0
+  array_n: 16
+  diameter: 0.009
+  pitch: 0.0105
+  geometry: sonicsurface_reference
+  reference_anchor_m: [0.08, 0.08]
+  source_radial_order: 64
+  source_angular_order: 256
+domain:
+  origin_m: [-0.04, -0.04, 0.0]
+  box_size: [0.24, 0.24, 0.16]
+  grid_size: [721, 721, 481]
+boundary_conditions:
+  "-x": open
+  "+x": open
+  "-y": open
+  "+y": open
+  "-z": reflecting
+  "+z": open
+targets:
+  - point: [0.08, 0.08, 0.12]
+obstacles: []
+solver:
+  backend: cudss_hybrid_direct
+  device: cuda
+  target_response_cache: outputs/pde_homogeneous_16x16/target_responses.npz
+  pml:
+    cells: 60
+    strength: 0.125
+    order: 3
+    faces: ["-x", "+x", "-y", "+y", "+z"]
+training:
+  loss_type: focal_pressure
+  initial_phase: random
+  seed: 7
+  background_weight: 0.0
+  load_basis_to_gpu: false
+  show_loss_curve: false
+  iterations: 300
+  max_evaluations: 600
+  source_exclusion_layers: 4
+io:
+  output_file: outputs/pde_homogeneous_16x16/result.npz
+  auto_visualize: false

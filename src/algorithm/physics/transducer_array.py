@@ -8,9 +8,9 @@ class TransducerArray:
         self.centers = self._compute_transducer_centers()
         self.num_transducers = len(self.centers)
 
-        # 换能器表面发射声压幅值 (统一采用标定上限 P0)
-        self.surface_p0 = self.cfg.calibrated_surface_pressure
-        self.amplitudes = np.full(self.num_transducers, self.surface_p0, dtype=np.float64)
+        # The corrected sinc Neumann source has unit normalization (field 1/m).
+        self.surface_p0 = 1.0
+        self.amplitudes = np.ones(self.num_transducers, dtype=np.float64)
         
         # 初始发射相位
         self.phases = np.zeros(self.num_transducers, dtype=np.float64)
@@ -19,9 +19,20 @@ class TransducerArray:
 
     def _compute_transducer_centers(self) -> np.ndarray:
         """计算 N*N 阵元在底面 (z = 0) 的中心物理坐标 [x, y, 0]"""
+        if self.cfg.specs.geometry == "sonicsurface_reference":
+            import json
+            from pathlib import Path
+            data = json.loads(
+                Path(__file__).with_name("sonicsurface_reference.json").read_text(encoding="utf-8")
+            )
+            positions = np.asarray(data["positions_vendor_xyz_m"], dtype=np.float64)
+            centers = positions[data["logical_to_device"]][:, [0, 2, 1]].copy()
+            centers[:, :2] += self.cfg.specs.reference_anchor_m
+            return centers
         n = self.cfg.specs.array_n
         pitch = self.cfg.specs.pitch
-        cx, cy = self.cfg.lx * 0.5, self.cfg.ly * 0.5
+        origin = np.asarray(self.cfg.domain.origin_m)
+        cx, cy = origin[:2] + np.asarray([self.cfg.lx, self.cfg.ly]) * 0.5
         half_span = (n - 1) * pitch * 0.5
 
         centers = []
@@ -46,7 +57,8 @@ class TransducerArray:
         if len(targets) == 1:
             focal_pos = np.array(targets[0], dtype=np.float64)
             dists = np.linalg.norm(self.centers - focal_pos, axis=-1)
-            return -self.cfg.k0 * dists
+            cycles = dists / self.cfg.wavelength
+            return 2.0 * np.pi * (np.ceil(cycles) - cycles)
 
         # 多目标时间反转波前叠加
         superposed_field = np.zeros(self.num_transducers, dtype=np.complex128)
@@ -59,21 +71,7 @@ class TransducerArray:
 
     def set_phases(self, phases: np.ndarray):
         """供逆向优化器直接更新相位的接口"""
-        assert len(phases) == self.num_transducers
-        self.phases = np.array(phases, dtype=np.float64)
-
-    def get_bottom_source_boundary(self, X_2d: np.ndarray, Y_2d: np.ndarray):
-        """生成底面 z=0 网格上的发射掩码与复声压 Dirichlet 边界值"""
-        mask = np.zeros(X_2d.shape, dtype=bool)
-        u_boundary = np.zeros(X_2d.shape, dtype=np.complex128)
-        radius_sq = (self.cfg.specs.diameter * 0.5) ** 2
-
-        for i, center in enumerate(self.centers):
-            tx, ty, _ = center
-            dist_sq = (X_2d - tx)**2 + (Y_2d - ty)**2
-            in_transducer = dist_sq <= radius_sq
-            
-            mask |= in_transducer
-            u_boundary[in_transducer] = self.amplitudes[i] * np.exp(1j * self.phases[i])
-
-        return mask, u_boundary
+        phases = np.asarray(phases, dtype=np.float64)
+        if phases.shape != (self.num_transducers,) or not np.isfinite(phases).all():
+            raise ValueError("phases must be a finite vector matching the array")
+        self.phases = phases.copy()

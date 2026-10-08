@@ -1,0 +1,13 @@
+{
+  "target_m": [
+    0.0093,
+    0.0071,
+    0.0102
+  ],
+  "evaluations": 18,
+  "initial_focal_pressure_pa": 3758.4410744309,
+  "optimized_focal_pressure_pa": 6619.0895467638165,
+  "fixed_amplitude_upper_bound_pa": 6619.089546763815,
+  "focal_efficiency": 1.0000000000000002,
+  "saved_field_vs_basis_relative_l2": 1.1669358076155545e-16
+}

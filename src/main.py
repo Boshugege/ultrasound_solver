@@ -19,13 +19,25 @@ def scene_metadata(cfg, solver):
         "transducer_radius": cfg.specs.diameter * 0.5,
         "dx": cfg.domain.dx, "frequency": cfg.frequency,
         "c0": cfg.physics.sound_speed, "mode": cfg.mode,
+        "propagation_model": solver.MODEL_VERSION,
+        "field_unit": solver.field_unit,
+        "time_convention": "Re(u exp(-i omega t))",
+        "source_geometry": cfg.specs.geometry,
+        "source_model": "sinc_neumann",
+        "source_aperture_m": cfg.specs.diameter,
     }
     if solver.obstacle_sdf is not None:
         output["sdf"] = solver.obstacle_sdf
     elif cfg.obstacles and cfg.obstacles[0].get("type") == "sphere":
         obs = cfg.obstacles[0]
-        axes = [np.linspace(0, length, count)
-                for length, count in zip(cfg.domain.box_size, cfg.domain.grid_size)]
+        axes = [
+            np.linspace(origin, origin+length, count)
+            for origin, length, count in zip(
+                cfg.domain.origin_m,
+                cfg.domain.box_size,
+                cfg.domain.grid_size,
+            )
+        ]
         grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
         output["sdf"] = np.linalg.norm(grid - obs["center"], axis=-1) - obs["radius"]
     return output
@@ -62,6 +74,15 @@ def save_phase_artifacts(result_path, cfg, result, metadata):
         "recommended_phase_kind": "best_evaluated",
         "phase_unit": "rad",
         "phase_convention": "solver_source_boundary",
+        "propagation_backend": cfg.solver.get("backend", "helmholtz"),
+        "source_geometry": cfg.specs.geometry,
+        "source_model": metadata.get("source_model", "sinc_neumann"),
+        "source_aperture_m": metadata.get("source_aperture_m", cfg.specs.diameter),
+        "source_positions_m": metadata.get("source_positions_m"),
+        "channel_order": (
+            "sonicsurface_logical" if cfg.specs.geometry == "sonicsurface_reference"
+            else "ideal_x_major_y_minor"
+        ),
         "hardware_ready": False,
         "hardware_note": (
             "Continuous solver phases require device mapping, calibration, "
@@ -104,7 +125,8 @@ def save_phase_optimization_result(
         algorithm=cfg.algorithm,
         phases=result.final.phases, u_complex=result.final.field,
         amplitude=np.abs(result.final.field), amp_sq=np.abs(result.final.field)**2,
-        best_phases=result.best.phases, best_amplitude=np.abs(result.best.field),
+        best_phases=result.best.phases, best_u_complex=result.best.field,
+        best_amplitude=np.abs(result.best.field),
         initial_amplitude=np.abs(initial_field),
         target_amplitude=problem.target.target, target_weight=problem.target.weight,
         loss_history=np.array([row["loss"] for row in result.history]),
@@ -125,7 +147,7 @@ def save_phase_optimization_result(
             geometric_amplitude=np.abs(geometric_field),
             geometric_amp_sq=np.abs(geometric_field)**2,
             geometric_metrics=json.dumps(
-                problem.metrics(geometric_field), allow_nan=False
+                problem.metrics(geometric_field, problem.focal_field(phases)), allow_nan=False
             ),
         )
     path = Path(cfg.io.output_file)
@@ -133,6 +155,11 @@ def save_phase_optimization_result(
         raise ValueError("io.output_file must end in .npz")
     loss_plot_path = path.with_name(f"{path.stem}_loss.png")
     metadata = {
+        "source_positions_m": solver.transducers.centers.tolist(),
+        "field_unit": solver.field_unit,
+        "source_model": output["source_model"],
+        "source_aperture_m": output["source_aperture_m"],
+        "propagation_model": solver.MODEL_VERSION,
         "algorithm": cfg.algorithm, "algorithm_options": cfg.algorithm_options,
         "seed": cfg.training.seed, "termination_reason": result.termination_reason,
         "final_loss": result.final.loss, "best_loss": result.best.loss,
@@ -173,7 +200,7 @@ def execute(cfg):
         )
     if cfg.mode == "phase_optimization":
         validate_algorithm(cfg)
-    from algorithm.solvers.helmholtz_solver import HelmholtzDirectSolver
+    from algorithm.solvers import HelmholtzDirectSolver
 
     solver = HelmholtzDirectSolver(cfg)
     basis = None

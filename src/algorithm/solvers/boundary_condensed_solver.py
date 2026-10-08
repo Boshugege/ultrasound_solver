@@ -9,7 +9,7 @@ from algorithm.solvers.cudss_hybrid_solver import CuDSSHybridSymmetricSolver
 
 class BoundaryCondensedDirectSolver:
     """
-    Exact direct solver after eliminating prescribed and open boundary rows.
+    Exact direct solver after eliminating prescribed pressure rows.
 
     The retained finite-difference rows form a complex-symmetric system. This
     allows cuDSS to use a symmetric factorization while the eliminated boundary
@@ -61,7 +61,9 @@ class BoundaryCondensedDirectSolver:
         self.condensation_time = time.perf_counter() - start
 
         start = time.perf_counter()
-        self.boundary_factor = spla.splu(self.a_ee.tocsc())
+        self.boundary_factor = (
+            spla.splu(self.a_ee.tocsc()) if self.a_ee.shape[0] else None
+        )
         self.boundary_factor_time = time.perf_counter() - start
 
         self.reduced_solver = CuDSSHybridSymmetricSolver(
@@ -75,88 +77,18 @@ class BoundaryCondensedDirectSolver:
         )
 
     def _build_condensed_system(self):
-        eliminated_mask, fixed_mask = self._eliminated_mask()
+        eliminated_mask, _ = self._eliminated_mask()
         self.eliminated_indices = np.flatnonzero(eliminated_mask)
         self.retained_indices = np.flatnonzero(~eliminated_mask)
-        if self.eliminated_indices.size == 0:
+        if self.retained_indices.size == 0:
             raise ValueError(
-                "boundary condensation requires at least one eliminated row"
+                "boundary condensation requires at least one free row"
             )
 
-        full_to_reduced = np.full(self.n, -1, dtype=np.int64)
-        full_to_reduced[self.retained_indices] = np.arange(
-            self.retained_indices.size,
-            dtype=np.int64,
-        )
-
-        dependency = np.full(self.n, -1, dtype=np.int64)
-        edge_coefficient = np.zeros(self.n, dtype=np.complex128)
-        for row in self.eliminated_indices:
-            if fixed_mask[row]:
-                continue
-            start = self.matrix.indptr[row]
-            stop = self.matrix.indptr[row + 1]
-            columns = self.matrix.indices[start:stop]
-            values = self.matrix.data[start:stop]
-            diagonal_values = values[columns == row]
-            off_diagonal = columns != row
-            neighbor_columns = columns[off_diagonal]
-            neighbor_values = values[off_diagonal]
-            if diagonal_values.size != 1 or neighbor_columns.size != 1:
-                raise ValueError(
-                    "open boundary row does not match the expected "
-                    f"two-entry form at DOF {row}"
-                )
-            dependency[row] = neighbor_columns[0]
-            edge_coefficient[row] = (
-                -neighbor_values[0] / diagonal_values[0]
-            )
-
-        target = np.full(self.n, -2, dtype=np.int64)
-        coefficient = np.zeros(self.n, dtype=np.complex128)
-        state = np.zeros(self.n, dtype=np.int8)
-        target[fixed_mask] = -1
-
-        def resolve(row: int):
-            if target[row] != -2:
-                return
-            if state[row] == 1:
-                raise ValueError("cycle detected in open boundary equations")
-            state[row] = 1
-            neighbor = int(dependency[row])
-            if neighbor < 0:
-                raise ValueError(
-                    f"open boundary row {row} has no interior dependency"
-                )
-            if eliminated_mask[neighbor]:
-                resolve(neighbor)
-                target[row] = target[neighbor]
-                coefficient[row] = (
-                    edge_coefficient[row] * coefficient[neighbor]
-                )
-            else:
-                target[row] = full_to_reduced[neighbor]
-                coefficient[row] = edge_coefficient[row]
-            state[row] = 2
-
-        for row in self.eliminated_indices:
-            resolve(int(row))
-
-        local_rows = np.flatnonzero(
-            target[self.eliminated_indices] >= 0
-        )
-        transfer_columns = target[
-            self.eliminated_indices[local_rows]
-        ]
-        transfer_values = coefficient[
-            self.eliminated_indices[local_rows]
-        ]
+        # Prescribed rows are identity equations, so their solution has no
+        # dependency on the retained unknowns (zero transfer).
         self.boundary_transfer = sp.csr_matrix(
             (
-                transfer_values,
-                (local_rows, transfer_columns),
-            ),
-            shape=(
                 self.eliminated_indices.size,
                 self.retained_indices.size,
             ),
@@ -169,9 +101,7 @@ class BoundaryCondensedDirectSolver:
         self.a_re = self.matrix[retained, :][:, eliminated].tocsr()
         self.a_er = self.matrix[eliminated, :][:, retained].tocsr()
         self.a_ee = self.matrix[eliminated, :][:, eliminated].tocsr()
-        reduced_matrix = (
-            a_rr + self.a_re @ self.boundary_transfer
-        ).tocsr()
+        reduced_matrix = a_rr
         reduced_matrix.sum_duplicates()
         reduced_matrix.eliminate_zeros()
         reduced_matrix.sort_indices()
@@ -201,35 +131,27 @@ class BoundaryCondensedDirectSolver:
         )
 
     def _eliminated_mask(self) -> tuple[np.ndarray, np.ndarray]:
-        nx, ny, nz = self.dims
-        indices = np.arange(self.n, dtype=np.int64)
-        i = indices % nx
-        j = (indices // nx) % ny
-        k = indices // (nx * ny)
-
-        open_mask = np.zeros(self.n, dtype=bool)
-        face_masks = {
-            "-x": i == 0,
-            "+x": i == nx - 1,
-            "-y": j == 0,
-            "+y": j == ny - 1,
-            "-z": k == 0,
-            "+z": k == nz - 1,
-        }
-        for face, mask in face_masks.items():
-            if self.boundary_conditions.get(face) == "open":
-                open_mask |= mask
-
+        # Robin/Neumann rows now retain the conservative PDE. Eliminating
+        # them as legacy two-entry boundary equations would be incorrect.
         fixed_mask = np.zeros(self.n, dtype=bool)
         fixed_mask[self.fixed_dofs] = True
-        return open_mask | fixed_mask, fixed_mask
+        prescribed = self.matrix[self.fixed_dofs]
+        if (np.any(prescribed.getnnz(axis=1) != 1)
+                or np.any(self.matrix.diagonal()[self.fixed_dofs] != 1)):
+            raise ValueError("fixed_dofs must identify identity Dirichlet rows")
+        return fixed_mask, fixed_mask
+
+    def _solve_boundary(self, rhs, trans="N"):
+        if self.boundary_factor is None:
+            return np.empty_like(rhs)
+        return self.boundary_factor.solve(rhs, trans=trans)
 
     def solve(self, rhs: np.ndarray) -> np.ndarray:
         rhs_matrix, squeeze = self._as_rhs_matrix(rhs)
         start = time.perf_counter()
 
         boundary_start = time.perf_counter()
-        boundary_part = self.boundary_factor.solve(
+        boundary_part = self._solve_boundary(
             rhs_matrix[self.eliminated_indices, :]
         )
         reduced_rhs = (
@@ -262,7 +184,7 @@ class BoundaryCondensedDirectSolver:
         start = time.perf_counter()
 
         boundary_start = time.perf_counter()
-        boundary_part = self.boundary_factor.solve(
+        boundary_part = self._solve_boundary(
             rhs_matrix[self.eliminated_indices, :],
             trans="H",
         )
@@ -281,7 +203,7 @@ class BoundaryCondensedDirectSolver:
             rhs_matrix[self.eliminated_indices, :]
             - self.a_re.conjugate().transpose() @ retained_solution
         )
-        eliminated_solution = self.boundary_factor.solve(
+        eliminated_solution = self._solve_boundary(
             eliminated_rhs,
             trans="H",
         )

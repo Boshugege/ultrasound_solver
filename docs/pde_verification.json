@@ -1,0 +1,75 @@
+{
+  "model": "helmholtz_conservative_sources_v4",
+  "boundary_convergence": [
+    {
+      "n": 17,
+      "reflecting_relative_l2": 0.003946330396472303,
+      "open_relative_l2": 0.006144619648170877
+    },
+    {
+      "n": 33,
+      "reflecting_relative_l2": 0.0010000808614124294,
+      "open_relative_l2": 0.0015229477053317758
+    },
+    {
+      "n": 65,
+      "reflecting_relative_l2": 0.00025228822875630983,
+      "open_relative_l2": 0.00037991053952517726
+    }
+  ],
+  "variable_material_manufactured": [
+    {
+      "n": 17,
+      "relative_l2": 0.007968937330597538
+    },
+    {
+      "n": 33,
+      "relative_l2": 0.001977999220717984
+    },
+    {
+      "n": 65,
+      "relative_l2": 0.0004935272306690444
+    }
+  ],
+  "two_material_transmission": [
+    {
+      "n": 34,
+      "relative_l2": 0.019336939666482002
+    },
+    {
+      "n": 66,
+      "relative_l2": 0.004935025721719547
+    },
+    {
+      "n": 130,
+      "relative_l2": 0.001249123407133519
+    }
+  ],
+  "oblique_reflection_amplitude": {
+    "robin": 0.14693387246134723,
+    "pml": 0.0045242779747027475
+  },
+  "material_adjoint": {
+    "adjoint_directional_derivative": -0.00016143749101315893,
+    "finite_differences": [
+      {
+        "epsilon": 0.001,
+        "finite_difference": -0.0001614374866055774,
+        "relative_error": 2.730209385736699e-08
+      },
+      {
+        "epsilon": 0.0001,
+        "finite_difference": -0.00016143749095127655,
+        "relative_error": 3.833210216185896e-10
+      },
+      {
+        "epsilon": 1e-05,
+        "finite_difference": -0.0001614374912830424,
+        "relative_error": 1.6717522002114115e-09
+      }
+    ],
+    "forward_relative_residual": 1.9568636975637e-09,
+    "adjoint_relative_residual": 7.171141335344237e-16,
+    "complex_symmetry_error": 0.0
+  }
+}

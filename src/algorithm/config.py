@@ -9,16 +9,31 @@ from typing import Dict, List, Union
 class PhysicsConfig:
     sound_speed: float = 343.0
     medium_density: float = 1.21
+    material_field_file: str = ""
 
 
 @dataclass
 class TransducerSpecsConfig:
     frequency: float = 40000.0     # Hz
-    spl_db: float = 115.0          # dB
-    spl_distance: float = 0.3      # m
     diameter: float = 0.0098       # m
     pitch: float = 0.0105          # m
     array_n: int = 6
+    geometry: str = "ideal_grid"
+    reference_anchor_m: List[float] = field(default_factory=lambda: [0.08, 0.08])
+    source_radial_order: int = 64
+    source_angular_order: int = 256
+
+    def __post_init__(self):
+        if (not isinstance(self.source_radial_order, int) or self.source_radial_order < 2
+                or not isinstance(self.source_angular_order, int) or self.source_angular_order < 8):
+            raise ValueError("Invalid source quadrature orders")
+        if self.geometry not in {"ideal_grid", "sonicsurface_reference"}:
+            raise ValueError("geometry must be ideal_grid or sonicsurface_reference")
+        if self.geometry == "sonicsurface_reference" and self.array_n != 16:
+            raise ValueError("SonicSurface reference geometry requires array_n=16")
+        anchor = np.asarray(self.reference_anchor_m, dtype=float)
+        if anchor.shape != (2,) or not np.isfinite(anchor).all():
+            raise ValueError("reference_anchor_m must contain two finite coordinates")
 
 
 @dataclass
@@ -27,6 +42,13 @@ class DomainConfig:
     box_size: List[float] = field(default_factory=lambda: [0.08, 0.08, 0.08])
     # 离散网格点数 [Nx, Ny, Nz]
     grid_size: List[int] = field(default_factory=lambda: [81, 81, 81])
+    # 物理坐标系中的网格原点
+    origin_m: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+
+    def __post_init__(self):
+        origin = np.asarray(self.origin_m, dtype=float)
+        if origin.shape != (3,) or not np.isfinite(origin).all():
+            raise ValueError("domain.origin_m must contain three finite coordinates")
 
     @property
     def nx(self) -> int: return self.grid_size[0]
@@ -102,7 +124,7 @@ class SimulationConfig:
     physics: PhysicsConfig
     specs: TransducerSpecsConfig
     domain: DomainConfig
-    boundary_conditions: Dict[str, str]
+    boundary_conditions: Dict[str, Union[str, dict]]
     targets: List[List[float]]
     obstacles: List[Dict]
     io: IOConfig
@@ -143,17 +165,6 @@ class SimulationConfig:
     @property
     def lz(self) -> float: return self.domain.lz
 
-    @property
-    def calibrated_surface_pressure(self) -> float:
-        """基于圆形活塞声辐射模型，从 SPL 标定反推发射表面声压 P0 (Pa)"""
-        p_ref = 20e-6
-        p_rms = p_ref * (10.0 ** (self.specs.spl_db / 20.0))
-        p_peak = np.sqrt(2.0) * p_rms
-        radius = self.specs.diameter * 0.5
-        
-        p0_surface = p_peak * (2.0 * self.specs.spl_distance) / (self.k0 * (radius ** 2))
-        return float(p0_surface)
-
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "SimulationConfig":
         yaml_path = Path(yaml_path).expanduser().resolve()
@@ -178,9 +189,16 @@ class SimulationConfig:
                 obstacle["file"] = str(mesh_path.resolve())
             obstacles.append(obstacle)
 
+        physics = dict(raw["physics"])
+        if physics.get("material_field_file"):
+            path = Path(physics["material_field_file"]).expanduser()
+            if not path.is_absolute():
+                path = yaml_path.parent / path
+            physics["material_field_file"] = str(path.resolve())
+
         return cls(
             mode=mode,
-            physics=PhysicsConfig(**raw["physics"]),
+            physics=PhysicsConfig(**physics),
             specs=TransducerSpecsConfig(**raw["transducer_specs"]),
             domain=DomainConfig(**raw["domain"]),
             boundary_conditions=raw["boundary_conditions"],

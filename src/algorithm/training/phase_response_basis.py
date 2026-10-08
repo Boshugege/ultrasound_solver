@@ -18,7 +18,7 @@ class PhaseResponseBasis:
     G @ exp(1j * phases), without another PDE solve.
     """
 
-    FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
 
     def __init__(
         self,
@@ -41,6 +41,7 @@ class PhaseResponseBasis:
         self.basis_gpu = None
         self.completed_columns = 0
         self._mesh_hash_cache = None
+        self._built_fingerprint = None
 
         if self.rhs_batch_size < 1:
             raise ValueError("rhs_batch_size must be at least 1")
@@ -76,13 +77,8 @@ class PhaseResponseBasis:
             return self
 
         self.solver.assemble_matrix()
-        dof_indices, emitter_ids = (
-            self.solver.warp_engine.emitter_dof_map()
-        )
-        counts = np.bincount(
-            emitter_ids,
-            minlength=self.num_transducers,
-        )
+        source_columns = self.solver.warp_engine.source_columns
+        counts = np.asarray(abs(source_columns).sum(axis=0)).ravel()
         missing = np.flatnonzero(counts == 0)
         if missing.size:
             raise ValueError(
@@ -101,17 +97,8 @@ class PhaseResponseBasis:
                 start + self.rhs_batch_size,
                 self.num_transducers,
             )
-            rhs = np.zeros(
-                (self.solver.total_dofs, stop - start),
-                dtype=np.complex128,
-                order="F",
-            )
-            for emitter in range(start, stop):
-                selected = emitter_ids == emitter
-                rhs[
-                    dof_indices[selected],
-                    emitter - start,
-                ] = amplitudes[emitter]
+            rhs = np.asfortranarray(source_columns[:, start:stop].toarray()
+                                    * amplitudes[None, start:stop], dtype=np.complex128)
 
             self.basis[:, start:stop] = self.solver.solve_rhs(
                 rhs,
@@ -142,6 +129,44 @@ class PhaseResponseBasis:
 
     def release_gpu(self):
         self.basis_gpu = None
+
+    def target_response(self, points):
+        """Trilinear complex-pressure response at physical target coordinates.
+
+        This interpolates the discrete PDE solution; it is not an analytic
+        sub-grid propagation model. Targets must lie outside absorbing layers.
+        """
+        self._require_complete()
+        points = np.asarray(points, dtype=float)
+        shape = np.asarray(self.solver.cfg.domain.grid_size)
+        origin = np.asarray(self.solver.cfg.domain.origin_m)
+        upper = np.asarray(self.solver.cfg.domain.box_size)
+        if (points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all()
+                or np.any(points < origin) or np.any(points > origin+upper)):
+            raise ValueError("Targets must be finite (N,3) coordinates inside the grid")
+        cells = int(self.solver.cfg.solver.get("pml", {}).get("cells", 0))
+        if cells:
+            from algorithm.physics.conservative_helmholtz import boundary_type, FACES
+            pml = self.solver.cfg.solver["pml"]
+            faces = pml.get("faces", [f for f in FACES if boundary_type(
+                self.solver.cfg.boundary_conditions.get(f, "reflecting")) == "open"])
+            for face in faces:
+                axis = "xyz".index(face[1])
+                local = points[:, axis]-origin[axis]
+                distance = local if face[0] == "-" else upper[axis]-local
+                if np.any(distance < cells*self.solver.cfg.domain.dx):
+                    raise ValueError("Target lies in PML; enlarge the physical interior")
+        position = (points-origin)/self.solver.cfg.domain.dx
+        low = np.minimum(np.floor(position).astype(int), shape-2)
+        fraction = position-low
+        response = np.zeros((len(points), self.num_transducers), complex)
+        for corner in np.ndindex(2, 2, 2):
+            corner = np.asarray(corner)
+            index = low+corner
+            weights = np.prod(np.where(corner, fraction, 1-fraction), axis=1)
+            rows = index[:, 0]+shape[0]*(index[:, 1]+shape[1]*index[:, 2])
+            response += weights[:, None]*self.basis[rows]
+        return response
 
     def field(
         self,
@@ -253,6 +278,7 @@ class PhaseResponseBasis:
             self.completed_columns = int(
                 metadata["completed_columns"]
             )
+            self._built_fingerprint = metadata["fingerprint"]
             return
 
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,9 +312,10 @@ class PhaseResponseBasis:
             raise RuntimeError("Invalid completed column count")
 
     def _write_metadata(self):
+        fingerprint = self._fingerprint()
         metadata = {
             "format_version": self.FORMAT_VERSION,
-            "fingerprint": self._fingerprint(),
+            "fingerprint": fingerprint,
             "shape": list(self.shape),
             "dtype": self.dtype.name,
             "completed_columns": self.completed_columns,
@@ -299,11 +326,14 @@ class PhaseResponseBasis:
             encoding="utf-8",
         )
         temporary.replace(self.metadata_path)
+        self._built_fingerprint = fingerprint
 
     def _fingerprint(self) -> str:
         cfg = self.solver.cfg
         payload = {
             "format_version": self.FORMAT_VERSION,
+            "propagation_model": self.solver.MODEL_VERSION,
+            "centers_m": self.solver.transducers.centers.tolist(),
             "physics": asdict(cfg.physics),
             "transducer_specs": asdict(cfg.specs),
             "domain": asdict(cfg.domain),
@@ -311,6 +341,8 @@ class PhaseResponseBasis:
             "obstacles": cfg.obstacles,
             "mesh_content_sha256": self._mesh_content_hashes(),
             "amplitudes": self.solver.transducers.amplitudes.tolist(),
+            "pde_scene": (self.solver.scene_fingerprint()
+                          if hasattr(self.solver, "scene_fingerprint") else None),
         }
         encoded = json.dumps(
             payload,
@@ -320,8 +352,6 @@ class PhaseResponseBasis:
         return hashlib.sha256(encoded).hexdigest()
 
     def _mesh_content_hashes(self) -> dict[str, str]:
-        if self._mesh_hash_cache is not None:
-            return self._mesh_hash_cache
         hashes = {}
         for obstacle in self.solver.cfg.obstacles:
             if obstacle.get("type", "").lower() != "mesh":
@@ -332,7 +362,6 @@ class PhaseResponseBasis:
                 for chunk in iter(lambda: mesh_file.read(1024 * 1024), b""):
                     digest.update(chunk)
             hashes[str(path)] = digest.hexdigest()
-        self._mesh_hash_cache = hashes
         return hashes
 
     def _chunked_matvec(self, weights: np.ndarray) -> np.ndarray:
@@ -377,3 +406,5 @@ class PhaseResponseBasis:
     def _require_complete(self):
         if self.basis is None or not self.is_complete:
             raise RuntimeError("Phase response basis is not complete")
+        if self._built_fingerprint is not None and self._fingerprint() != self._built_fingerprint:
+            raise RuntimeError("Physical scene changed; rebuild the phase response basis")

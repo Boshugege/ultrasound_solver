@@ -105,9 +105,10 @@ def build_gaussian_target_fields(
     target = np.full(shape, float(background_pressure), dtype=np.float64)
     weight = np.full(shape, float(background_weight), dtype=np.float64)
 
-    xs = np.linspace(0.0, cfg.domain.lx, cfg.domain.nx)
-    ys = np.linspace(0.0, cfg.domain.ly, cfg.domain.ny)
-    zs = np.linspace(0.0, cfg.domain.lz, cfg.domain.nz)
+    origin = np.asarray(cfg.domain.origin_m, dtype=float)
+    xs = np.linspace(origin[0], origin[0]+cfg.domain.lx, cfg.domain.nx)
+    ys = np.linspace(origin[1], origin[1]+cfg.domain.ly, cfg.domain.ny)
+    zs = np.linspace(origin[2], origin[2]+cfg.domain.lz, cfg.domain.nz)
     x, y, z = np.meshgrid(xs, ys, zs, indexing="ij")
     sigma_sq = sigma * sigma
     for point in points:
@@ -136,20 +137,16 @@ def build_gaussian_target_fields(
 
 def _nearest_grid_index(cfg, point: np.ndarray) -> tuple[int, int, int]:
     dx = cfg.domain.dx
-    return (
-        int(round(point[0] / dx)),
-        int(round(point[1] / dx)),
-        int(round(point[2] / dx)),
-    )
+    return tuple(np.rint((point-np.asarray(cfg.domain.origin_m))/dx).astype(int))
 
 
 def _validate_target_point(cfg, point: np.ndarray) -> None:
-    lower = np.zeros(3, dtype=np.float64)
-    upper = np.array([cfg.domain.lx, cfg.domain.ly, cfg.domain.lz])
+    lower = np.asarray(cfg.domain.origin_m, dtype=np.float64)
+    upper = lower+np.array([cfg.domain.lx, cfg.domain.ly, cfg.domain.lz])
     if np.any(point < lower) or np.any(point > upper):
         raise ValueError(
             "target point is outside the domain: "
-            f"{point.tolist()} not in [0, {upper.tolist()}]"
+            f"{point.tolist()} not in [{lower.tolist()}, {upper.tolist()}]"
         )
 
 
@@ -206,6 +203,22 @@ class AmplitudeFieldLoss:
         return target_mean, background_mean
 
 
+def _focal_term(field, indices, weight, eps, with_cotangent, focal_field, xp):
+    """External exact samples have their own VJP, separate from the grid VJP."""
+    index_arrays = tuple(np.asarray(indices, dtype=np.intp).T)
+    values = field[index_arrays] if focal_field is None else focal_field
+    amplitude = xp.abs(values)
+    loss = -weight * xp.mean(amplitude)
+    cotangent = xp.zeros_like(field, dtype=xp.complex128) if with_cotangent else None
+    if with_cotangent and focal_field is None:
+        # Repeated target indices must accumulate (also on GPU).
+        contribution = -weight / len(indices) * values / (amplitude + eps)
+        # CuPy scatter-add supports real types, not complex128.
+        xp.add.at(cotangent.real, index_arrays, contribution.real)
+        xp.add.at(cotangent.imag, index_arrays, contribution.imag)
+    return loss, cotangent
+
+
 class FocalPressureLoss:
     def __init__(
         self,
@@ -224,16 +237,12 @@ class FocalPressureLoss:
         self.target_weight = float(cfg.training.target_weight)
         self.background_weight = float(cfg.training.background_weight)
 
-    def evaluate(self, field: np.ndarray, with_cotangent: bool = True):
+    def evaluate(self, field: np.ndarray, with_cotangent: bool = True, focal_field=None):
         amplitude = np.abs(field)
-        cotangent = np.zeros_like(field, dtype=np.complex128) if with_cotangent else None
-        focal_loss = 0.0
-        scale = self.target_weight / len(self.target_indices)
-        for index in self.target_indices:
-            value = amplitude[index]
-            focal_loss -= scale * float(value)
-            if with_cotangent:
-                cotangent[index] -= scale * field[index] / (value + self.eps)
+        focal_loss, cotangent = _focal_term(
+            field, self.target_indices, self.target_weight, self.eps,
+            with_cotangent, focal_field, np,
+        )
 
         background_loss = 0.0
         if self.background_weight > 0.0:
@@ -244,21 +253,16 @@ class FocalPressureLoss:
                 cotangent += self.background_weight / field.size * field
         return focal_loss + background_loss, cotangent
 
-    def evaluate_device(self, field, with_cotangent: bool = True):
+    def evaluate_device(self, field, with_cotangent: bool = True, focal_field=None):
         amplitude = cp.abs(field)
-        indices = tuple(np.asarray(self.target_indices, dtype=np.intp).T)
-        values = amplitude[indices]
-        loss = -self.target_weight * cp.mean(values)
-        if not with_cotangent:
-            if self.background_weight > 0.0:
-                loss += 0.5 * self.background_weight * cp.mean(amplitude * amplitude)
-            return loss, None
-        cotangent = cp.zeros_like(field, dtype=cp.complex128)
-        scale = self.target_weight / len(self.target_indices)
-        cotangent[indices] -= scale * field[indices] / (values + self.eps)
+        loss, cotangent = _focal_term(
+            field, self.target_indices, self.target_weight, self.eps,
+            with_cotangent, focal_field, cp,
+        )
         if self.background_weight > 0.0:
             loss += 0.5 * self.background_weight * cp.mean(amplitude * amplitude)
-            cotangent += self.background_weight / field.size * field
+            if with_cotangent:
+                cotangent += self.background_weight / field.size * field
         return loss, cotangent
 
     def stats(self, field: np.ndarray) -> tuple[float, float]:
@@ -301,19 +305,12 @@ class FocalContrastLoss:
         if not np.any(self.background_mask):
             raise ValueError("focal_contrast background mask is empty")
 
-    def evaluate(self, field: np.ndarray, with_cotangent: bool = True):
+    def evaluate(self, field: np.ndarray, with_cotangent: bool = True, focal_field=None):
         amplitude = np.abs(field)
-        cotangent = np.zeros_like(field, dtype=np.complex128) if with_cotangent else None
-
-        scale = self.target_weight / len(self.target_indices)
-        target_values = []
-        for index in self.target_indices:
-            value = amplitude[index]
-            target_values.append(value)
-            if with_cotangent:
-                cotangent[index] -= scale * field[index] / (value + self.eps)
-        target_mean = float(np.mean(target_values))
-        loss = -self.target_weight * target_mean
+        loss, cotangent = _focal_term(
+            field, self.target_indices, self.target_weight, self.eps,
+            with_cotangent, focal_field, np,
+        )
 
         background_values = amplitude[self.background_mask]
         maximum = float(np.max(background_values))
@@ -336,11 +333,12 @@ class FocalContrastLoss:
         cotangent[self.background_mask] += background_cotangent
         return loss, cotangent
 
-    def evaluate_device(self, field, with_cotangent: bool = True):
+    def evaluate_device(self, field, with_cotangent: bool = True, focal_field=None):
         amplitude = cp.abs(field)
-        indices = tuple(np.asarray(self.target_indices, dtype=np.intp).T)
-        target_values = amplitude[indices]
-        loss = -self.target_weight * cp.mean(target_values)
+        loss, cotangent = _focal_term(
+            field, self.target_indices, self.target_weight, self.eps,
+            with_cotangent, focal_field, cp,
+        )
         background_mask = self._device_array("background_mask", self.background_mask)
         background_values = amplitude[background_mask]
         maximum = cp.max(background_values)
@@ -353,9 +351,6 @@ class FocalContrastLoss:
         )
         if not with_cotangent:
             return loss, None
-        cotangent = cp.zeros_like(field, dtype=cp.complex128)
-        scale = self.target_weight / len(self.target_indices)
-        cotangent[indices] -= scale * field[indices] / (target_values + self.eps)
         cotangent[background_mask] += (
             self.sidelobe_weight
             * probabilities

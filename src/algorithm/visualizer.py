@@ -4,6 +4,11 @@ import numpy as np
 import pyvista as pv
 
 
+FIELD_ALIASES = {
+    "geometric_amplitude": ("geometric_amplitude", "baseline_amplitude"),
+}
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="PyVista 硬件加速超声声场 3D 交互可视化")
     parser.add_argument("result", nargs="?", default="ultrasound_field.npz", help="npz 仿真结果路径")
@@ -66,41 +71,57 @@ def available_scalar_fields(data) -> list[str]:
         "initial_amplitude",
         "target_amplitude",
     ):
-        if key in data:
+        if _resolve_field_key(data, key) is not None:
             fields.append(key)
     if "amplitude" in data and "target_amplitude" in data:
         fields.extend(["abs_error", "signed_error"])
     return fields
 
 
+def _resolve_field_key(data, key: str) -> str | None:
+    for candidate in FIELD_ALIASES.get(key, (key,)):
+        if candidate in data:
+            return candidate
+    return None
+
+
+def amplitude_unit(data):
+    return "1/m (normalized)" if str(data.get("field_unit", "Pa")) == "normalized_1_per_m" else "Pa"
+
+
 def select_scalar_field(data, field_name: str, use_sq: bool):
+    unit = amplitude_unit(data)
     if field_name == "abs_error":
         field = np.abs(data["amplitude"] - data["target_amplitude"])
-        return field, "Error |optimized - target|", "Pa"
+        return field, "Error |optimized - target|", unit
     if field_name == "signed_error":
         field = data["amplitude"] - data["target_amplitude"]
-        return field, "Error optimized - target", "Pa"
-    if field_name not in data:
+        return field, "Error optimized - target", unit
+    field_key = _resolve_field_key(data, field_name)
+    if field_key is None:
         valid = ", ".join(available_scalar_fields(data))
         raise ValueError(f"Field {field_name!r} is unavailable. Valid fields: {valid}")
-    field = data[field_name]
+    field = data[field_key]
     if field_name == "amplitude" and use_sq:
         if "amp_sq" in data:
             field = data["amp_sq"]
         else:
             field = field**2
-        return field, "Intensity (|p|²)", "Pa²"
+        return field, "Squared amplitude (|p|²)", "1/m² (normalized)" if unit != "Pa" else "Pa²"
     titles = {
         "amplitude": "Amplitude optimized |p|",
         "geometric_amplitude": "Amplitude geometric phase |p|",
         "initial_amplitude": "Amplitude initial |p|",
         "target_amplitude": "Target amplitude",
     }
-    return field, titles[field_name], "Pa"
+    return field, titles[field_name], unit
 
 
 def _copy_scalar_field(data, key: str, hide_source_layers: int) -> np.ndarray:
-    field = np.array(data[key], dtype=np.float64, copy=True)
+    field_key = _resolve_field_key(data, key)
+    if field_key is None:
+        raise KeyError(key)
+    field = np.array(data[field_key], dtype=np.float64, copy=True)
     if hide_source_layers > 0:
         layers = min(int(hide_source_layers), field.shape[2])
         field[:, :, :layers] = np.nan
@@ -203,10 +224,12 @@ def show_method_comparison_scene(
     hide_source_layers: int = 0,
 ):
     data = np.load(result_path, allow_pickle=True)
-    if "geometric_amplitude" not in data:
+    unit = amplitude_unit(data)
+    if _resolve_field_key(data, "geometric_amplitude") is None:
         data.close()
         raise ValueError(
-            "comparison requires geometric_amplitude in the result file"
+            "comparison requires geometric_amplitude (or legacy "
+            "baseline_amplitude) in the result file"
         )
 
     geometric = _copy_scalar_field(
@@ -264,8 +287,8 @@ def show_method_comparison_scene(
 
     hud_actor = plotter.add_text(
         "Geometric red vs optimized blue\n"
-        f"Red level: {geometric_level:.1f} Pa / max {geometric_max:.1f} Pa\n"
-        f"Blue level: {optimized_level:.1f} Pa / max {optimized_max:.1f} Pa",
+        f"Red level: {geometric_level:.1f} {unit} / max {geometric_max:.1f} {unit}\n"
+        f"Blue level: {optimized_level:.1f} {unit} / max {optimized_max:.1f} {unit}",
         position="upper_left",
         font_size=11,
         color="white",
@@ -281,8 +304,8 @@ def show_method_comparison_scene(
         hud_actor.SetText(
             0,
             "Geometric red vs optimized blue\n"
-            f"Red level: {levels['geometric']:.1f} Pa / max {geometric_max:.1f} Pa\n"
-            f"Blue level: {levels['optimized']:.1f} Pa / max {optimized_max:.1f} Pa",
+            f"Red level: {levels['geometric']:.1f} {unit} / max {geometric_max:.1f} {unit}\n"
+            f"Blue level: {levels['optimized']:.1f} {unit} / max {optimized_max:.1f} {unit}",
         )
 
     def geometric_slider_callback(value):
@@ -313,7 +336,7 @@ def show_method_comparison_scene(
         callback=geometric_slider_callback,
         rng=[geometric_min, geometric_max],
         value=geometric_level,
-        title="Geometric red threshold (Pa)",
+        title=f"Geometric red threshold ({unit})",
         pointa=(0.04, 0.92),
         pointb=(0.36, 0.92),
         color="#ff1744",
@@ -323,7 +346,7 @@ def show_method_comparison_scene(
         callback=optimized_slider_callback,
         rng=[optimized_min, optimized_max],
         value=optimized_level,
-        title="Optimized blue threshold (Pa)",
+        title=f"Optimized blue threshold ({unit})",
         pointa=(0.04, 0.84),
         pointb=(0.36, 0.84),
         color="#2979ff",

@@ -1,0 +1,3 @@
+[submodule "control/thirdparty/SonicSurface"]
+	path = control/thirdparty/SonicSurface
+	url = https://github.com/Rain-Kotsuzui/SonicSurface.git

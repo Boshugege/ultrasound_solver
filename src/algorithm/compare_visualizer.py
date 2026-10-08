@@ -11,7 +11,7 @@ import pyvista as pv
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from algorithm.visualizer import _add_static_scene_context, _copy_scalar_field
+from algorithm.visualizer import _add_static_scene_context, _copy_scalar_field, amplitude_unit
 
 
 FIELD_LABELS = {
@@ -50,6 +50,7 @@ def _load_results(comparison_dir):
                     for key in (
                         "dx", "source_positions", "target_points",
                         "transducer_radius", "boundary_conditions", "sdf",
+                        "field_unit",
                     )
                     if key in data
                 }
@@ -63,6 +64,7 @@ def _load_results(comparison_dir):
 
 def show_comparison_results(comparison_dir, percentile=95.0, hide_source_layers=0):
     summary, static, result_sets = _load_results(comparison_dir)
+    unit = amplitude_unit(static)
     algorithms = list(result_sets)
     modes = [
         name for name in FIELD_LABELS
@@ -116,7 +118,7 @@ def show_comparison_results(comparison_dir, percentile=95.0, hide_source_layers=
             f"Algorithm: {algorithm}\n"
             f"Field: {FIELD_LABELS[state['field_mode']]}\n"
             f"Iso percentile: {state['percentile']:.0f}%\n"
-            f"Level: {level:.1f} Pa | Max: {high:.1f} Pa",
+            f"Level: {level:.1f} {unit} | Max: {high:.1f} {unit}",
         )
 
     def algorithm_callback(value):

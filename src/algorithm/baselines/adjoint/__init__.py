@@ -196,13 +196,14 @@ def solve(problem, options):
         def objective(phases):
             nonlocal current
             # Reuse the initial evaluation and repeated line-search requests.
-            if not np.array_equal(phases, current.phases):
+            if not np.array_equal(np.mod(phases, 2 * np.pi), current.phases):
                 current = problem.evaluate(phases, gradient=True)
             return current.loss, current.gradient
 
         result = minimize(
             objective, current.phases, jac=True, method="L-BFGS-B",
-            bounds=[(0, 2 * np.pi)] * problem.size,
+            # Phases live on a circle: box bounds create false boundary optima.
+            # Keep the optimizer's coordinates unwrapped; evaluation is periodic.
             options={"maxiter": problem.iterations, "ftol": 1e-12,
                      "gtol": 1e-8, "maxls": 40},
         )

@@ -23,7 +23,7 @@ from algorithm.baselines.loss_curve import (
     save_loss_dashboard,
 )
 from main import save_phase_optimization_result
-from algorithm.solvers.helmholtz_solver import HelmholtzDirectSolver
+from algorithm.solvers import HelmholtzDirectSolver
 
 
 QUALITY_TARGETS = (

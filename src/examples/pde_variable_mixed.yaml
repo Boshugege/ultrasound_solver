@@ -1,0 +1,60 @@
+# Small PDE acceptance scene: spatial material inclusion + four boundary types.
+# 0.5 mm grid, 17.3 points/background wavelength at 40 kHz.
+mode: phase_optimization
+algorithm: adjoint
+algorithm_options:
+  optimizer: lbfgsb
+physics:
+  sound_speed: 346.0
+  medium_density: 1.21
+transducer_specs:
+  frequency: 40000.0
+  array_n: 2
+  diameter: 0.0015
+  pitch: 0.004
+  geometry: ideal_grid
+domain:
+  box_size: [0.016, 0.016, 0.016]
+  grid_size: [33, 33, 33]
+boundary_conditions:
+  "-x": reflecting
+  "+x":
+    type: impedance
+    impedance: [500.0, 100.0]  # Z = real + i imag, Pa s/m
+  "-y": soft
+  "+y": open
+  "-z": reflecting
+  "+z": open
+targets:
+  - point: [0.0093, 0.0071, 0.0102]
+obstacles:
+  - type: sphere
+    center: [0.008, 0.008, 0.006]
+    radius: 0.002
+    smoothing_width_cells: 1.2
+    material:
+      density: 1.6
+      sound_speed: 390.0
+solver:
+  backend: cudss_hybrid_direct
+  direct_residual_tol: 0.00001
+  pml:
+    cells: 6
+    strength: 2.0
+    order: 3
+    faces: ["+y", "+z"]
+training:
+  loss_type: focal_pressure
+  initial_phase: random
+  seed: 7
+  background_weight: 0.0
+  phase_basis_file: outputs/pde_variable_mixed/basis.npy
+  phase_basis_batch_size: 4
+  load_basis_to_gpu: true
+  show_loss_curve: false
+  iterations: 100
+  max_evaluations: 200
+  source_exclusion_layers: 2
+io:
+  output_file: outputs/pde_variable_mixed/result.npz
+  auto_visualize: false
