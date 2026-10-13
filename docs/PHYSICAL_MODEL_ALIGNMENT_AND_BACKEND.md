@@ -67,11 +67,23 @@
 修改后使用 `sinc_neumann`：
 
 ```text
-f(r) = 1 / [2 pi a sqrt(a²-r²)]
+varrho_j(s) = |s_parallel-c_j|
+f_a(varrho) = 1 / [2 pi a sqrt(a²-varrho²)],  0 <= varrho < a
+(1/rho) dp/dn = (2 pi/rho_ref) A_j exp(i phi_j) f_a(varrho_j(s))
 ```
 
-该有限孔径分布具有单位积分，二维傅里叶变换恰好是官方
-`sinc(a k sin(theta))`。实现通过 Gauss 径向求积和方位角求积，
+这里 `j` 是阵元编号，`varrho_j(s)` 才是孔径点 `s` 到第 `j` 个阵元中心
+`c_j` 的局部径向距离；两者不是同一个变量。
+
+该有限孔径分布具有单位积分，二维傅里叶变换为：
+
+```text
+D(theta) = sin(a k sin(theta))/(a k sin(theta))
+         = sinc(a k sin(theta)/pi)
+```
+
+因此官方 `D(theta) exp(i k R)/R` 是该孔径积分在 `R >> a` 时的远场渐近式。
+实现通过 Gauss 径向求积和方位角求积，
 再将质量双线性沉积到 PDE 源面节点，保持每个阵元：
 
 - 总源质量为 1；
@@ -80,6 +92,11 @@ f(r) = 1 / [2 pi a sqrt(a²-r²)]
 
 源改为刚性挡板上的归一化 Neumann 通量，不再把圆盘节点强制为固定声压。
 输出单位为归一化 `1/m`，不再错误套用旧压力圆盘的 SPL→Pa 换算。
+
+这里的 `sinc` 描述远场方向图，`Neumann` 描述孔径上指定的法向通量；
+它不是六个外边界中的新边界类型。底面仍配置为 `-z: reflecting`，
+孔径外通量为零，孔径内叠加上述非齐次通量。完整公式、离散 RHS、官方等价关系
+和现实模型边界见 [sinc Neumann 有限孔径声源](SINC_NEUMANN_SOURCE.html)。
 
 ### 5. 边界条件和 PML
 

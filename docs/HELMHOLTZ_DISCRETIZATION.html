@@ -144,7 +144,9 @@
     </tbody>
   </table>
 
-  <p>在当前实现中，内部普通网格点没有体源项，因此右端通常为 0。换能器激励通过 Dirichlet 行写入右端。</p>
+  <p>在当前实现中，内部普通网格点没有体源项，因此右端通常为 0。
+    换能器通过底面刚性挡板上的 sinc Neumann 孔径通量写入右端，见
+    <a href="SINC_NEUMANN_SOURCE.html">SINC_NEUMANN_SOURCE.html</a>。</p>
 
   <h2>网格与编号</h2>
 
@@ -282,79 +284,57 @@
 
   <h2>Open 边界</h2>
 
-  <p><code>open</code> 边界使用一阶 Sommerfeld 吸收边界条件：</p>
+  <p><code>open</code> 边界使用局部一阶 Sommerfeld 条件：</p>
 
   \[
-  \frac{\partial u}{\partial n} - i k_0 u = 0
+  \frac{\partial u}{\partial n} - i\frac{\omega}{c_P}u = 0
   \]
 
-  <p>其中：</p>
+  <p>除以密度后，外向通量为
+    \((1/\rho_P)\partial u/\partial n=i\omega u/(\rho_Pc_P)\)。
+    若该控制体积外表面面积权重为 \(S_f\)、体积权重为 \(V_P\)，则在原 PDE
+    对角项增加：</p>
 
   \[
-  k_0 = \frac{\omega}{c_0}
-  \]
-
-  <p>以 \(-x\) 边界为例，边界点为 \(P\)，域内相邻点为 \(Q=P+\hat{x}\)。代码使用：</p>
-
-  \[
-  \frac{u_P - u_Q}{\Delta x} - i k_0 u_P = 0
-  \]
-
-  <p>整理得到矩阵行：</p>
-
-  \[
-  \left(\frac{1}{\Delta x} - i k_0\right)u_P
-  -
-  \frac{1}{\Delta x}u_Q
+  \Delta A_{P,P}^{\mathrm{open}}
   =
-  0
+  \frac{i\omega S_f}{\rho_Pc_PV_P}
   \]
 
-  <p>因此对应矩阵条目为：</p>
+  <p>原有内部邻居和质量项保持不变；多个 open/impedance 面在棱角处逐面累加。
+    生产配置还会在 open 面内侧使用坐标拉伸 PML。</p>
+
+  <h2>换能器 sinc Neumann 通量</h2>
+
+  <p>底面 \(z=0\) 整体按 reflecting 刚性挡板装配。设第 \(j\) 个阵元中心为
+    \(\mathbf c_j\)，孔径点 \(\mathbf s\) 的局部径向坐标为
+    \(\varrho_j(\mathbf s)=\|\mathbf s_\parallel-\mathbf c_j\|\)。
+    在 \(\varrho_j(\mathbf s)&lt;a\) 内施加：</p>
 
   \[
-  A_{P,P} = \frac{1}{\Delta x} - i k_0
+  \frac{1}{\rho}\frac{\partial u}{\partial n}
+  =
+  \frac{2\pi}{\rho_{\mathrm{ref}}}
+  A_je^{i\phi_j}
+  \frac{1}{2\pi a\sqrt{a^2-\varrho_j(\mathbf s)^2}}
   \]
+
+  <p>求积和双线性沉积得到单位质量矩阵 \(M_s\)，底面外法向为 \(-z\)，
+    因而离散源列为：</p>
 
   \[
-  A_{P,Q} = -\frac{1}{\Delta x}
+  S_{\mathrm{bottom}}
+  =
+  -\frac{2\pi}{\rho_{\mathrm{ref}}\Delta x^3}M_s
   \]
+
+  <p>令 \(B=S\,\mathrm{diag}(A_1,\ldots,A_M)\)，完整 RHS 为：</p>
 
   \[
-  b_P = 0
+  b(\phi)=B e^{i\phi}
   \]
 
-  <p>其他开放边界面使用同样逻辑，只是域内邻居方向不同。</p>
-
-  <h2>换能器 Dirichlet 激励</h2>
-
-  <p>底面 \(z=0\) 上落入某个换能器圆盘区域的网格点被设置为 Dirichlet 激励点。</p>
-
-  <p>若该点属于第 \(r\) 个换能器，幅值为 \(A_r\)，相位为 \(\phi_r\)，则：</p>
-
-  \[
-  u_P = A_r e^{i\phi_r}
-  \]
-
-  <p>矩阵中这一行被替换为单位行：</p>
-
-  \[
-  A_{P,P} = 1
-  \]
-
-  \[
-  A_{P,Q} = 0
-  \qquad Q \neq P
-  \]
-
-  \[
-  b_P = A_r e^{i\phi_r}
-  \]
-
-  <p>代码中对应实部和虚部写法：</p>
-
-  <pre><code>rhs_r[idx] = amp * cos(phase)
-rhs_i[idx] = amp * sin(phase)</code></pre>
+  <p>声源不替换矩阵行；底面压力仍由 Helmholtz 方程求解。</p>
 
   <h2>最终线性系统</h2>
 
@@ -381,13 +361,13 @@ rhs_i[idx] = amp * sin(phase)</code></pre>
       </tr>
       <tr>
         <td>open 边界点</td>
-        <td>Sommerfeld 一阶边界方程</td>
+        <td>保守 PDE 行 + 局部 Sommerfeld 面通量</td>
         <td>0</td>
       </tr>
       <tr>
         <td>换能器点</td>
-        <td>Dirichlet 单位行</td>
-        <td>\(A_r e^{i\phi_r}\)</td>
+        <td>reflecting 控制体积行</td>
+        <td>sinc Neumann 积分通量</td>
       </tr>
     </tbody>
   </table>
@@ -404,7 +384,9 @@ rhs_i[idx] = amp * sin(phase)</code></pre>
 
   <p>本节给出摘要，完整块分解证明、稀疏传递矩阵和同因子伴随推导见 <a href="BOUNDARY_CONDENSATION.html">BOUNDARY_CONDENSATION.html</a>。</p>
 
-  <p>默认直接后端会在装配之后消去换能器 Dirichlet 行和 open Sommerfeld 行。把保留的内部/reflecting 自由度记为 \(R\)，被消去的边界自由度记为 \(E\)，原方程写为：</p>
+  <p>边界凝聚仅处理确实可以消元的边界自由度；sinc Neumann 源属于保守 RHS，
+    不产生待消去的换能器 Dirichlet 行。把保留自由度记为 \(R\)，
+    待消去边界自由度记为 \(E\)，原方程写为：</p>
 
   \[
   \begin{bmatrix}
@@ -438,21 +420,26 @@ rhs_i[idx] = amp * sin(phase)</code></pre>
   b_R-A_{RE}A_{EE}^{-1}b_E
   \]
 
-  <p>由于当前每个 open 边界方程只依赖自身和一个向内邻居，边界传递关系保持稀疏。约化矩阵严格满足复对称关系 \(S=S^T\)，代码会在分解前数值验证该性质。求得 \(u_R\) 后再按上式恢复 \(u_E\)，最终返回的仍是原始 \(A u=b\) 的完整空间解。</p>
+  <p>当前 Robin/Neumann 自然边界保留在保守 PDE 矩阵中，不按旧式两元素边界行消元。
+    仅满足规定值结构的自由度进入 \(E\)。约化矩阵必须通过复对称检查；
+    求得 \(u_R\) 后再恢复 \(u_E\)，最终返回原始 \(A u=b\) 的完整空间解。</p>
 
   <h2>相位更新时的矩阵复用</h2>
 
-  <p>当前优化变量只有换能器相位。介质、障碍物、频率、网格和边界条件不变时，矩阵 \(A\) 不随相位变化，只有 Dirichlet 右端变化：</p>
+  <p>当前优化变量只有换能器相位。介质、障碍物、频率、网格和边界条件不变时，
+    矩阵 \(A\) 不随相位变化，只有通量源右端变化：</p>
 
   \[
   b(\phi) = B e^{i\phi}
   \]
 
-  <p>因此第一次调用会装配 \(A\)、缓存底面阵元映射并建立求解因子；后续相位迭代只在已缓存的 Dirichlet 点上使用 <code>complex128</code> 更新复数 RHS：</p>
+  <p>因此第一次调用会装配 \(A\)、缓存稀疏孔径源列并建立求解因子；
+    后续相位迭代使用 <code>complex128</code> 更新复数 RHS：</p>
 
   \[
-  b_P(\phi_r) = A_r e^{i\phi_r}
+  b(\phi)=B\left(A\odot e^{i\phi}\right)
   \]
 
-  <p>这不是近似或边界修改，只是避免重复计算与相位无关的矩阵条目。首次完整装配和 RHS-only 更新使用同一阵元几何映射。</p>
+  <p>这不是近似或边界修改，只是避免重复计算与相位无关的矩阵条目。
+    首次完整装配和 RHS-only 更新使用同一有限孔径质量矩阵。</p>
 </div>

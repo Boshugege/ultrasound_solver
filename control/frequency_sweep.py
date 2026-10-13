@@ -14,15 +14,15 @@ from sonicsurface.phase_source import load_phase_vector
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_URL = "http://127.0.0.1:8765"
 OPTIMIZER_CONFIG = (
-    REPOSITORY_ROOT / "src" / "examples" / "front_center_free_field_16x16.yaml"
+    REPOSITORY_ROOT / "src" / "examples" / "pde_homogeneous_16x16.yaml"
 )
 PHASE_FILE = (
     REPOSITORY_ROOT
     / "outputs"
-    / "front_center_free_field_16x16"
-    / "result_best_phases_rad.npy"
+    / "pde_homogeneous_16x16"
+    / "front_focus_alg_phases.npz"
 )
-NPZ_KEY = None
+NPZ_KEY = "phases_rad"
 FORCE_OPTIMIZE = False
 
 MIN_FREQUENCY_HZ = 20.0
@@ -55,7 +55,8 @@ def ensure_phase_file(
     subprocess.run(
         [
             sys.executable,
-            str(REPOSITORY_ROOT / "src" / "main.py"),
+            str(REPOSITORY_ROOT / "control" / "front_focus_alg.py"),
+            "--offline",
             "--config",
             str(optimizer_config),
         ],

@@ -328,7 +328,9 @@
   k_0=\frac{\omega}{c_0}
   \]
 
-  <p>当前内部没有体声源，激励完全通过底面换能器 Dirichlet 边界进入右端。</p>
+  <p>当前内部没有体声源。阵元通过底面刚性挡板上的非齐次
+    sinc Neumann 有限孔径通量进入右端；完整定义见
+    <a href="SINC_NEUMANN_SOURCE.html">SINC_NEUMANN_SOURCE.html</a>。</p>
 
   <h2>障碍物与空间材料场</h2>
 
@@ -425,79 +427,56 @@
   z_{a,b}=0
   \]
 
-  <p>网格点落入半径 \(a_t=D/2\) 的圆盘时，被标记为对应阵元的 Dirichlet 点。</p>
-
-  <h3>SPL 到表面声压</h3>
-
-  <p>参考声压为：</p>
+  <p>设第 \(j\) 个阵元中心为 \(\mathbf c_j\)，孔径点 \(\mathbf s\) 到中心的
+    局部径向距离为
+    \(\varrho_j(\mathbf s)=\|\mathbf s_\parallel-\mathbf c_j\|\)。
+    每个中心对应半径 \(a_t=D/2\) 的圆形有限孔径。代码不是把孔径节点设成
+    规定声压，而是用求积点构造归一化 Neumann 通量分布：</p>
 
   \[
-  p_{\mathrm{ref}}=20\ \mu\mathrm{Pa}
+  f_a(\varrho)=\frac{1}{2\pi a_t\sqrt{a_t^2-\varrho^2}},
+  \qquad
+  \int_{\Gamma_j} f_a(\varrho_j(\mathbf s))\,dS=1
   \]
 
-  <p>由声压级 \(L_p\) 得到标定位置的 RMS 声压：</p>
-
   \[
-  p_{\mathrm{rms}}
+  \left.\frac{1}{\rho}\frac{\partial u}{\partial n}\right|_{\Gamma_j}
   =
-  p_{\mathrm{ref}}
-  10^{L_p/20}
+  \frac{2\pi}{\rho_{\mathrm{ref}}}
+  A_j e^{i\phi_j} f_a(\varrho_j(\mathbf s))
   \]
 
-  <p>峰值声压：</p>
-
-  \[
-  p_{\mathrm{peak}}
-  =
-  \sqrt{2}\,p_{\mathrm{rms}}
-  \]
-
-  <p>代码采用圆形活塞远场轴向近似：</p>
-
-  \[
-  p_{\mathrm{peak}}(r)
-  \approx
-  p_0
-  \frac{k_0 a_t^2}{2r}
-  \]
-
-  <p>反推出表面 Dirichlet 幅值：</p>
-
-  \[
-  p_0
-  =
-  p_{\mathrm{peak}}(r)
-  \frac{2r}{k_0a_t^2}
-  \]
-
-  <p>这里的活塞公式只用于幅值标定。进入 PDE 后，阵元被建模为指定复声压的 Dirichlet 圆盘。</p>
+  <p>该分布的二维傅里叶变换为
+    \(\sin(a_tq)/(a_tq)\)。令 \(q=k\sin\theta\) 后，即得到官方模型使用的
+    sinc 方向图。旧 SPL→表面压力换算和规定声压圆盘已经删除；当前输出是
+    归一化 \(1/\mathrm{m}\)，不是硬件标定 Pa。</p>
 
   <h3>阵元相位</h3>
 
-  <p>第 \(r\) 个阵元的复边界值为：</p>
+  <p>第 \(j\) 个阵元在线性源矩阵中的复权重为：</p>
 
   \[
-  u_r=p_{0,r}e^{i\phi_r}
+  w_j=A_je^{i\phi_j}
   \]
 
   <p>单目标基准相位使用自由空间传播补偿：</p>
 
   \[
-  \phi_r=-k_0d_r
+  \phi_j=-k_0d_j
   \]
 
   <p>多目标时先叠加时间反转权重：</p>
 
   \[
-  U_r
+  U_j
   =
   \sum_m
-  \frac{1}{d_{r,m}}
-  e^{-ik_0d_{r,m}}
+  \frac{1}{d_{j,m}}
+  e^{-ik_0d_{j,m}}
   \]
 
   \[
-  \phi_r=\arg(U_r)
+  \phi_j=\arg(U_j)
   \]
 
   <h2>边界条件的物理推导</h2>
@@ -570,17 +549,32 @@
   }
   \]
 
-  <p>当前实现始终使用背景波数 \(k_0=\omega/c_0\)。它是一阶局部吸收边界，不是无反射的 PML。</p>
-
-  <h3>换能器 Dirichlet 边界</h3>
-
-  <p>落入阵元圆盘的底面点直接指定复声压：</p>
+  <p>当前实现使用边界节点的局部 \(c(\mathbf{x})\) 和 \(\rho(\mathbf{x})\)，
+    将其作为控制体积外表面通量加入原 PDE 行：</p>
 
   \[
-  u=A_re^{i\phi_r}
+  \frac{1}{\rho}\frac{\partial u}{\partial n}
+  =
+  \frac{i\omega}{\rho c}u
   \]
 
-  <p>该条件优先于底面的 reflecting 设置，因此底面由“阵元 Dirichlet 圆盘 + 其余刚性挡板”组成。</p>
+  <p>它不是用单独两元素方程替换 PDE 行。多个 open/impedance 面在棱角处逐面累加。
+    一阶局部 open 仍会反射斜入射波，生产配置在 open 面内侧继续使用 PML。</p>
+
+  <h3>换能器 sinc Neumann 孔径</h3>
+
+  <p>底面整体仍是 reflecting 刚性挡板。孔径外满足
+    \((1/\rho)\partial u/\partial n=0\)，阵元孔径内叠加归一化非齐次通量：</p>
+
+  \[
+  \frac{1}{\rho}\frac{\partial u}{\partial n}
+  =
+  \frac{2\pi}{\rho_{\mathrm{ref}}}
+  A_je^{i\phi_j}f_a(\varrho_j(\mathbf s))
+  \]
+
+  <p><code>sinc_neumann</code> 是声源定义，不是额外的 YAML 外边界类型。
+    PDE 继续在源面控制体积上成立，声压 \(u\) 由场方程求出而不被钉死。</p>
 
   <h2>均匀三维网格</h2>
 
@@ -752,82 +746,63 @@
 
   <p>其余五个方向仍按普通通量离散。这是有限体积意义下的自然零通量实现。</p>
 
-  <h2>Open 边界的离散化</h2>
+  <h2>Open / impedance 边界通量的离散化</h2>
 
-  <p>设 \(P\) 是边界点，\(Q\) 是唯一向内邻居。所有六个坐标面上的外法向一阶差分都可以统一写成：</p>
-
-  \[
-  \frac{\partial u}{\partial n}
-  \approx
-  \frac{u_P-u_Q}{h}
-  \]
-
-  <p>代入 Sommerfeld 条件：</p>
+  <p>设边界控制体积节点为 \(P\)，某个外表面的面积权重为 \(S_f\)，
+    控制体积权重为 \(V_P\)。open 条件在原 Helmholtz 行的对角项增加：</p>
 
   \[
-  \frac{u_P-u_Q}{h}
-  -
-  ik_0u_P
+  \Delta A_{P,P}^{\mathrm{open}}
   =
-  0
+  \frac{i\omega S_f}{\rho_P c_P V_P}
   \]
 
-  <p>得到矩阵行：</p>
+  <p>阻抗 \(Z=R+iX\) 的边界满足
+    \((1/\rho)\partial u/\partial n=(i\omega/Z)u\)，对应：</p>
 
   \[
-  A_{P,P}
+  \Delta A_{P,P}^{Z}
   =
-  \frac{1}{h}-ik_0
+  \frac{i\omega S_f}{Z V_P}
   \]
 
+  <p>内部邻居通量、质量项和其他边界面贡献全部保留。位于棱或角的节点按实际相交面
+    累加，不再以 <code>if/elif</code> 只选第一个面。</p>
+
+  <h2>Neumann 孔径通量的离散化</h2>
+
+  <p><code>source_mass_matrix()</code> 对每个孔径做 Gauss 径向与方位角求积，
+    再将每个求积点双线性沉积到源面节点。设所得单位质量矩阵为 \(M_s\)，
+    则保守有限体积 RHS 的阵元列为：</p>
+
   \[
-  A_{P,Q}
+  S_{\mathrm{bottom}}
   =
-  -\frac{1}{h}
+  -\frac{2\pi}{\rho_{\mathrm{ref}}h^3}M_s
   \]
+
+  <p>负号来自底面外法向指向 \(-z\)。令
+    \(B=S\,\mathrm{diag}(A_1,\ldots,A_M)\)，完整右端为：</p>
 
   \[
-  b_P=0
+  b(\phi)=B e^{i\phi}
   \]
 
-  <p>Open 点不再使用 7 点 Helmholtz stencil，而是整行替换成这条两元素边界方程。</p>
-
-  <h2>Dirichlet 换能器行的离散化</h2>
-
-  <p>换能器点的整行替换为单位行：</p>
-
-  \[
-  A_{P,P}=1
-  \]
-
-  \[
-  A_{P,Q}=0,
-  \qquad
-  Q\neq P
-  \]
-
-  \[
-  b_P=A_re^{i\phi_r}
-  \]
-
-  <p>因此相位变化只改变 \(b\)，不改变 \(A\)。这正是后续复用矩阵和分解因子的数学依据。</p>
+  <p>源只进入 RHS，不替换 Helmholtz 矩阵行。因此相位变化仍只改变 \(b\)，
+    固定场景的矩阵与分解因子可以安全复用。</p>
 
   <h2>边界分支优先级</h2>
 
   <p>每个网格点只生成一条矩阵行。Warp 内核的判断顺序为：</p>
 
   <ol>
-    <li>底面换能器点：Dirichlet 单位行。</li>
-    <li>\(-x\) Open 面。</li>
-    <li>\(+x\) Open 面。</li>
-    <li>\(-y\) Open 面。</li>
-    <li>\(+y\) Open 面。</li>
-    <li>\(-z\) Open 面。</li>
-    <li>\(+z\) Open 面。</li>
-    <li>其余点：内部或 reflecting 7 点 stencil。</li>
+    <li>pressure-release (`soft`) 点：Dirichlet 单位行。</li>
+    <li>其余点按控制体积装配内部、reflecting、open 或 impedance 通量。</li>
+    <li>棱角处的自然边界通量逐面叠加。</li>
+    <li>矩阵完成后，将 sinc Neumann 孔径通量加入底面 RHS。</li>
   </ol>
 
-  <p>这意味着换能器优先于 Open/Reflecting；位于多个 Open 面交线上的边或角点，只使用上述顺序中第一个匹配的面方程。</p>
+  <p>源不得与 PML、侧边界或 pressure-release 面重叠；装配器会显式拒绝冲突。</p>
 
   <h2>稀疏矩阵组装</h2>
 
@@ -865,7 +840,8 @@
     </tbody>
   </table>
 
-  <p>Dirichlet 行只使用槽位 0；Open 行只使用槽位 0 和 1；其他槽位写入数值 0。</p>
+  <p>soft Dirichlet 行只使用槽位 0；其他控制体积行按相邻边与各外表面通量写入。
+    声源不再创建专用矩阵行。</p>
 
   <h3>GPU 并行写入</h3>
 
@@ -880,7 +856,7 @@ coo_vals_i
 rhs_r
 rhs_i</code></pre>
 
-  <p>同时在底面记录每个网格点对应的阵元编号 <code>emitter_map_bottom</code>，用于后续仅更新 RHS。</p>
+  <p>孔径求积独立生成稀疏源列 <code>source_columns</code>，用于后续仅更新 RHS。</p>
 
   <h3>从 COO 到 CSR</h3>
 
@@ -942,16 +918,14 @@ rhs_i</code></pre>
   <p>只有右端变化：</p>
 
   \[
-  b_P(\phi_r)
-  =
-  A_re^{i\phi_r}
+  b(\phi)=B e^{i\phi}
   \]
 
   <p>后续相位迭代执行：</p>
 
   <ol>
-    <li>读取缓存的底面阵元编号。</li>
-    <li>用新相位生成 <code>complex128</code> Dirichlet RHS。</li>
+    <li>读取缓存的稀疏 sinc Neumann 源列。</li>
+    <li>用新相位生成 <code>complex128</code> 通量 RHS。</li>
     <li>复用已装配的 \(A\)。</li>
     <li>高性能后端继续复用边界分解与 cuDSS 因子。</li>
   </ol>
@@ -1049,9 +1023,9 @@ harmonic ansatz exp(-i omega t)
 variable-coefficient Helmholtz equation
         |
         +--> material SDF fields rho(x), c(x)
-        +--> transducer Dirichlet rows
+        +--> baffled sinc Neumann aperture RHS
         +--> reflecting zero-flux faces
-        +--> open Sommerfeld rows
+        +--> integrated open / impedance face fluxes
         |
         v
 7-point flux discretization

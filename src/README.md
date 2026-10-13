@@ -125,16 +125,24 @@ algorithm_options:
 ### `transducer_specs`
 
 - `frequency`: 换能器频率，单位 `Hz`。
-- `spl_db`: 换能器声压级标定值，单位 `dB`。
-- `spl_distance`: 声压级标定距离，单位 `m`。
 - `diameter`: 单个换能器有效直径，单位 `m`。
 - `pitch`: 阵元中心间距，单位 `m`。
 - `array_n`: 方形阵列单边阵元数量，总阵元数为 `array_n * array_n`。
+- `geometry`: `ideal_grid` 或 16×16 的 `sonicsurface_reference`。
+- `reference_anchor_m`: SonicSurface 参考坐标锚点 `[x,y]`，单位 `m`。
+- `source_radial_order`: sinc Neumann 孔径的 Gauss 径向求积阶数。
+- `source_angular_order`: sinc Neumann 孔径的方位角求积点数。
+
+当前声源固定为刚性挡板上的归一化 `sinc_neumann` 有限孔径通量源。
+已删除规定声压圆盘、`spl_db`、`spl_distance` 和声源模型选择分支。
+公式、归一化、离散 RHS 与官方远场等价见
+[`docs/SINC_NEUMANN_SOURCE.html`](../docs/SINC_NEUMANN_SOURCE.html)。
 
 ### `domain`
 
 - `box_size`: 求解域尺寸 `[Lx, Ly, Lz]`，单位 `m`。
 - `grid_size`: 网格点数 `[Nx, Ny, Nz]`。当前求解器要求三方向网格步长一致。
+- `origin_m`: 求解域在物理坐标系中的原点 `[x,y,z]`，单位 `m`。
 
 ### `solver`
 
@@ -191,7 +199,12 @@ algorithm_options:
 
 ### `boundary_conditions`
 
-- `-x`、`+x`、`-y`、`+y`、`-z`、`+z`: 六个边界面的边界条件，支持 `open` 和 `reflecting`。底面 `-z` 中的换能器区域由阵列 Dirichlet 边界控制。
+- `-x`、`+x`、`-y`、`+y`、`-z`、`+z`: 六个外边界面，支持
+  `open`、`reflecting`、`soft` 和 `{type: impedance, impedance: [R,X]}`。
+- 生产阵列要求 `-z: reflecting`。阵元孔径在该刚性挡板上叠加非齐次
+  Neumann 通量；孔径外保持零法向通量。`sinc_neumann` 是声源定义，
+  不是额外的 YAML 边界类型。
+- open 面可通过 `solver.pml` 配置内部 PML；源、目标与障碍物不得位于 PML 内。
 
 ### `targets`
 

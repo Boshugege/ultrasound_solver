@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from dataclasses import dataclass
@@ -32,17 +33,22 @@ SERVICE_URL = "http://127.0.0.1:8765"
 
 TARGET_X_M = 0.08
 TARGET_Y_M = 0.08
-START_HEIGHT_M = 0.12
+START_HEIGHT_M = 0.06
 END_HEIGHT_M = 0.03
 PATH_POINT_COUNT = 16
 
 OPTIMIZATION_ITERATIONS = 120
 FORCE_RECOMPUTE = False
 
-PLAYBACK_HZ = 5.0
+ROUND_TRIP_SECONDS = 6.1
 LOOP_PLAYBACK = True
-ENVELOPE_FREQUENCY_HZ = 200.0  # None 表示不加包络
+ENVELOPE_FREQUENCY_HZ = None  # 运动轨迹直接覆盖相位，不插入关闭帧
 ENVELOPE_DUTY_CYCLE = 0.5
+
+BYTES_PER_MODULATED_POINT_CHANGE = 3 * 258
+BYTES_PER_STATIC_POINT_CHANGE = 258
+SERIAL_BITS_PER_SECOND = 230400.0
+BITS_PER_SERIAL_BYTE = 10.0
 
 
 @dataclass(frozen=True)
@@ -167,26 +173,129 @@ def prepare_line_phases(
     return points, phases
 
 
+def playback_hz_for_round_trip(
+    playback_point_count: int,
+    round_trip_seconds: float,
+    envelope_frequency_hz: float | None = ENVELOPE_FREQUENCY_HZ,
+) -> float:
+    if not np.isfinite(round_trip_seconds) or round_trip_seconds <= 0.0:
+        raise ValueError("单次往返时间必须是正数")
+    frequency = playback_point_count / round_trip_seconds
+    bytes_per_change = (
+        BYTES_PER_STATIC_POINT_CHANGE
+        if envelope_frequency_hz is None
+        else BYTES_PER_MODULATED_POINT_CHANGE
+    )
+    theoretical_max_hz = (
+        SERIAL_BITS_PER_SECOND
+        / (bytes_per_change * BITS_PER_SERIAL_BYTE)
+    )
+    recommended_max_hz = 70.0 if envelope_frequency_hz is None else 24.0
+    if frequency >= theoretical_max_hz:
+        minimum = playback_point_count / theoretical_max_hz
+        raise ValueError(
+            f"单次往返时间过短；当前串口协议理论上至少需要 {minimum:.2f} 秒"
+        )
+    if frequency > recommended_max_hz:
+        print(
+            f"[警告] 请求 {frequency:.1f} 点/秒接近串口上限，"
+            "实际往返时间可能略长于设定值"
+        )
+    return frequency
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="PDE-optimized vertical focal-point line trajectory"
+    )
+    parser.add_argument(
+        "--point-count",
+        type=int,
+        default=PATH_POINT_COUNT,
+        help="竖直线段上的唯一振幅点数（含两个端点）",
+    )
+    parser.add_argument(
+        "--round-trip-seconds",
+        type=float,
+        default=ROUND_TRIP_SECONDS,
+        help="起点到终点再返回起点所需秒数",
+    )
+    parser.add_argument(
+        "--start-height",
+        type=float,
+        default=START_HEIGHT_M,
+        help="起点高度，单位 m",
+    )
+    parser.add_argument(
+        "--end-height",
+        type=float,
+        default=END_HEIGHT_M,
+        help="终点高度，单位 m",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="只往返一次，默认循环播放",
+    )
+    envelope = parser.add_mutually_exclusive_group()
+    envelope.add_argument(
+        "--envelope-frequency",
+        type=float,
+        default=ENVELOPE_FREQUENCY_HZ,
+        help="触觉包络频率，单位 Hz",
+    )
+    envelope.add_argument(
+        "--no-envelope",
+        action="store_true",
+        help="关闭包络，只连续切换聚焦相位",
+    )
+    parser.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="忽略已有相位缓存并重新计算",
+    )
+    parser.add_argument("--config", type=Path, default=CONFIG_FILE)
+    return parser
+
+
 def main() -> None:
+    args = _parser().parse_args()
     path = LinePath(
         x_m=TARGET_X_M,
         y_m=TARGET_Y_M,
-        start_height_m=START_HEIGHT_M,
-        end_height_m=END_HEIGHT_M,
-        point_count=PATH_POINT_COUNT,
+        start_height_m=args.start_height,
+        end_height_m=args.end_height,
+        point_count=args.point_count,
     )
     try:
-        unique_points, unique_phases = prepare_line_phases(path)
+        unique_points, unique_phases = prepare_line_phases(
+            path,
+            config_file=args.config,
+            force_recompute=args.force_recompute,
+        )
         indices = path.playback_indices()
+        envelope_frequency_hz = (
+            None if args.no_envelope else args.envelope_frequency
+        )
+        playback_hz = playback_hz_for_round_trip(
+            indices.size,
+            args.round_trip_seconds,
+            envelope_frequency_hz,
+        )
+        print(
+            f"[播放] 每次往返 {indices.size} 个播放点，"
+            f"目标时间 {args.round_trip_seconds:.3f} 秒，"
+            f"更新率 {playback_hz:.2f} 点/秒"
+        )
         play_phase_path(
             unique_points[indices],
             unique_phases[indices],
             service_url=SERVICE_URL,
-            playback_hz=PLAYBACK_HZ,
-            loop=LOOP_PLAYBACK,
-            envelope_frequency_hz=ENVELOPE_FREQUENCY_HZ,
+            playback_hz=playback_hz,
+            loop=LOOP_PLAYBACK and not args.once,
+            envelope_frequency_hz=envelope_frequency_hz,
             envelope_duty_cycle=ENVELOPE_DUTY_CYCLE,
-            source_name="line",
+            source_name="line-pde",
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"错误：{exc}") from exc

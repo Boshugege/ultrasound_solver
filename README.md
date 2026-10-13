@@ -8,7 +8,8 @@
 
 - 三维 Helmholtz 方程 7 点 stencil 离散。
 - 支持变密度、变声速介质和基于 SDF 的障碍物建模。
-- 支持换能器 Dirichlet 激励边界、Sommerfeld open 边界和 reflecting 刚性反射边界。
+- 使用刚性挡板上的归一化 `sinc_neumann` 有限孔径通量源；支持局部 open、
+  reflecting、soft、impedance 边界及 PML。
 - 支持多种求解后端：`gpu_iterative`、`gpu_direct`、`cudss_hybrid_direct`。
 - 支持边界凝聚直接法，降低大规模直接求解的显存压力。
 - 支持固定场景的相位响应基：
@@ -80,6 +81,8 @@ python src/algorithm/visualizer.py outputs/phase_oblique_reflecting_x_16x16/resu
 
 主要专题文档：
 
+- [`docs/SINC_NEUMANN_SOURCE.html`](docs/SINC_NEUMANN_SOURCE.html)：当前唯一声源模型、
+  Neumann 孔径公式、官方 sinc 远场等价与现实适用边界。
 - [`docs/ACOUSTIC_PHYSICS_DERIVATION.html`](docs/ACOUSTIC_PHYSICS_DERIVATION.html)：从流体力学到声学 Helmholtz 方程。
 - [`docs/HELMHOLTZ_DISCRETIZATION.html`](docs/HELMHOLTZ_DISCRETIZATION.html)：离散化、矩阵装配和边界处理。
 - [`docs/MESH_TO_SDF.html`](docs/MESH_TO_SDF.html)：mesh 障碍物配置、几何变换、SDF 采样和材料插值。

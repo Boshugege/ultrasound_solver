@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sinc Neumann 有限孔径与官方模型的等价推导</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f9fc;
+      --panel: #ffffff;
+      --text: #1f2933;
+      --muted: #5f6c7b;
+      --line: #d8dee4;
+      --accent: #1d4ed8;
+      --accent-soft: #eff6ff;
+      --warning: #b45309;
+      --warning-soft: #fff7ed;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.7;
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 36px 32px 72px;
+      background: var(--panel);
+    }
+    h1 {
+      margin: 10px 0 12px;
+      font-size: 32px;
+      line-height: 1.25;
+    }
+    h2 {
+      margin: 38px 0 14px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid var(--line);
+      font-size: 23px;
+      line-height: 1.35;
+    }
+    h3 {
+      margin: 26px 0 10px;
+      font-size: 18px;
+    }
+    p { margin: 10px 0; }
+    a { color: var(--accent); }
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #f3f4f6;
+      font-family: Consolas, "SFMono-Regular", monospace;
+    }
+    pre {
+      padding: 14px 16px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #f6f8fa;
+    }
+    pre code { padding: 0; background: transparent; }
+    table {
+      width: 100%;
+      margin: 16px 0 22px;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f6f8fa; }
+    .lead {
+      margin-bottom: 24px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+    .note {
+      margin: 16px 0;
+      padding: 11px 14px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+    }
+    .warn {
+      margin: 16px 0;
+      padding: 11px 14px;
+      border-left: 4px solid var(--warning);
+      background: var(--warning-soft);
+    }
+    .theorem {
+      margin: 20px 0;
+      padding: 14px 16px;
+      border: 1px solid #bfd3ff;
+      border-radius: 8px;
+      background: var(--accent-soft);
+    }
+    .theorem strong { color: #1e40af; }
+    nav {
+      margin: 22px 0 30px;
+      padding: 14px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f6f8fa;
+    }
+    nav ol { margin: 0; padding-left: 22px; }
+    .steps {
+      counter-reset: proof-step;
+    }
+    .steps > h2::before {
+      counter-increment: proof-step;
+      content: counter(proof-step) ". ";
+      color: var(--accent);
+    }
+    footer {
+      margin-top: 42px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+    }
+    @media (max-width: 720px) {
+      main { padding: 24px 18px 48px; }
+      h1 { font-size: 27px; }
+      table { font-size: 14px; }
+    }
+    @media print {
+      body { background: #fff; }
+      main { max-width: none; padding: 0; }
+      h2, h3, .theorem, .note, .warn, table { break-inside: avoid; }
+    }
+  </style>
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [["\\(", "\\)"]],
+        displayMath: [["\\[", "\\]"]]
+      },
+      svg: { fontCache: "global" }
+    };
+  </script>
+  <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head>
+<body>
+<main>
+  <a href="main.html">返回文档入口</a>
+  <h1>sinc Neumann 有限孔径与官方模型的等价推导</h1>
+  <p class="lead">
+    本文从刚性半空间的 Neumann Green 函数出发，证明当前 PDE 的有限孔径通量源
+    在远场极限下严格退化为官方使用的
+    \(D(\theta)e^{ikR}/R\) 阵元传播公式。
+  </p>
+
+  <div class="theorem">
+    <strong>最终结论。</strong>
+    对半径为 \(a\) 的孔径采用
+    \(f_a(\varrho)=1/[2\pi a\sqrt{a^2-\varrho^2}]\)，并在刚性挡板上施加归一化
+    Neumann 通量，则第 \(j\) 个阵元在 \(R_j\gg a\) 时满足：
+    \[
+    p_j(\mathbf x)
+    =
+    A_j e^{i\phi_j}
+    \frac{e^{ikR_j}}{R_j}
+    \left[
+    \frac{\sin(ak\sin\theta_j)}{ak\sin\theta_j}
+    +
+    O\!\left(\frac{a}{R_j}+\frac{ka^2}{R_j}\right)
+    \right].
+    \]
+    主项与当前官方参考模型逐项相同。
+  </div>
+
+  <nav aria-label="推导目录">
+    <ol>
+      <li><a href="#notation">假设与符号</a></li>
+      <li><a href="#green">半空间 Neumann Green 表示</a></li>
+      <li><a href="#normalization">孔径归一化</a></li>
+      <li><a href="#transform">孔径傅里叶变换</a></li>
+      <li><a href="#far-field">远场渐近与官方公式</a></li>
+      <li><a href="#discrete">离散实现与连续式的一致性</a></li>
+      <li><a href="#scope">等价范围与现实模型边界</a></li>
+    </ol>
+  </nav>
+
+  <section id="notation">
+    <h2>假设与符号</h2>
+
+    <p>采用时间约定：</p>
+    \[
+    \operatorname{Re}\!\left(p(\mathbf x)e^{-i\omega t}\right),
+    \qquad
+    k=\frac{\omega}{c_0}.
+    \]
+
+    <p>参考问题是均匀流体半空间：</p>
+    \[
+    \Omega=\{(x,y,z):z>0\},
+    \qquad
+    \nabla^2p+k^2p=0.
+    \]
+
+    <p>平面 \(z=0\) 是刚性挡板。设第 \(j\) 个阵元中心为
+      \(\mathbf c_j=(c_{jx},c_{jy},0)\)。孔径为：</p>
+    \[
+    \Gamma_j=
+    \left\{
+      \mathbf s=(s_x,s_y,0):
+      \varrho_j(\mathbf s)\lt a
+    \right\},
+    \]
+    \[
+    \varrho_j(\mathbf s)
+    =
+    \left\|
+      \mathbf s_\parallel-\mathbf c_{j,\parallel}
+    \right\|.
+    \]
+
+    <div class="note">
+      \(j\) 是离散阵元编号；\(\varrho_j(\mathbf s)\) 是连续空间中的局部径向距离。
+      二者不是同一个变量。所有阵元使用相同的孔径函数，角标只改变中心、幅值和相位。
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>符号</th><th>含义</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>\(j=1,\ldots,M\)</td><td>阵元逻辑编号</td></tr>
+        <tr><td>\(\mathbf c_j\)</td><td>第 \(j\) 个阵元中心</td></tr>
+        <tr><td>\(\mathbf s\)</td><td>孔径面上的积分点</td></tr>
+        <tr><td>\(\varrho_j(\mathbf s)\)</td><td>积分点到第 \(j\) 个阵元中心的平面距离</td></tr>
+        <tr><td>\(a\)</td><td>所有阵元共用的有效孔径半径</td></tr>
+        <tr><td>\(A_j,\phi_j\)</td><td>第 \(j\) 个阵元的驱动幅值与相位</td></tr>
+        <tr><td>\(R_j,\theta_j\)</td><td>阵元中心到观察点的距离与离轴角</td></tr>
+        <tr><td>\(\rho_0\)</td><td>均匀参考问题中的实际背景介质密度</td></tr>
+        <tr><td>\(\rho_{\mathrm{ref}}\)</td><td>固定声源强度所使用的归一化参考密度</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="steps">
+    <section id="green">
+      <h2>半空间 Neumann Green 表示</h2>
+
+      <p>自由空间出射 Green 函数取为：</p>
+      \[
+      G_0(\mathbf x,\mathbf s)
+      =
+      \frac{e^{ik|\mathbf x-\mathbf s|}}
+      {4\pi|\mathbf x-\mathbf s|},
+      \qquad
+      (\nabla^2+k^2)G_0=-\delta.
+      \]
+
+      <p>为满足平面刚壁的齐次 Neumann 条件，使用镜像 Green 函数：</p>
+      \[
+      G_N(\mathbf x,\mathbf s)
+      =
+      G_0(\mathbf x,\mathbf s)
+      +
+      G_0(\mathbf x,\mathbf s^\prime).
+      \]
+
+      <p>当源点 \(\mathbf s\) 位于 \(z=0\) 时，
+        \(\mathbf s^\prime=\mathbf s\)，因此：</p>
+      \[
+      G_N(\mathbf x,\mathbf s)
+      =
+      \frac{e^{ik|\mathbf x-\mathbf s|}}
+      {2\pi|\mathbf x-\mathbf s|}.
+      \]
+
+      <p>当前孔径分布定义为：</p>
+      \[
+      f_a(\varrho)
+      =
+      \frac{1}
+      {2\pi a\sqrt{a^2-\varrho^2}},
+      \qquad 0\leq\varrho\lt a.
+      \]
+
+      <p>\(\rho_0\) 与 \(\rho_{\mathrm{ref}}\) 的物理角色不同，但当前生产实现取值相同：
+        二者都来自配置项 <code>physics.medium_density</code>，当前为
+        \(1.21\ \mathrm{kg/m^3}\)。分开记号是为了说明，在变材料场景中
+        \(\rho(\mathbf x)\) 可以随位置变化，而 \(\rho_{\mathrm{ref}}\) 仍固定为背景空气密度，
+        从而保证阵元 RHS 不随待优化材料参数变化。</p>
+
+      <p>第 \(j\) 个孔径上的外向法向通量为：</p>
+      \[
+      \left.
+      \frac{1}{\rho_0}
+      \frac{\partial p_j}{\partial n}
+      \right|_{\Gamma_j}
+      =
+      \frac{2\pi}{\rho_{\mathrm{ref}}}
+      A_j e^{i\phi_j}
+      f_a\!\left(\varrho_j(\mathbf s)\right).
+      \]
+
+      <p>在官方对齐的均匀参考介质中 \(\rho_0=\rho_{\mathrm{ref}}\)，于是：</p>
+      \[
+      \frac{\partial p_j}{\partial n}
+      =
+      2\pi A_j e^{i\phi_j}
+      f_a\!\left(\varrho_j(\mathbf s)\right).
+      \]
+
+      <p>Green 第二恒等式给出半空间解：</p>
+      \[
+      \begin{aligned}
+      p_j(\mathbf x)
+      &=
+      \int_{\Gamma_j}
+      G_N(\mathbf x,\mathbf s)
+      \frac{\partial p_j}{\partial n}(\mathbf s)\,dS\\
+      &=
+      A_j e^{i\phi_j}
+      \int_{\Gamma_j}
+      f_a\!\left(\varrho_j(\mathbf s)\right)
+      \frac{e^{ik|\mathbf x-\mathbf s|}}
+      {|\mathbf x-\mathbf s|}
+      \,dS.
+      \end{aligned}
+      \]
+
+      <p class="note">
+        这正是代码中 <code>aperture_field()</code> 使用的 Rayleigh 型有限孔径积分。
+        挡板镜像产生的 \(2\pi\) 与边界通量中的 \(2\pi\) 正好抵消。
+      </p>
+    </section>
+
+    <section id="normalization">
+      <h2>孔径归一化</h2>
+
+      <p>对任意阵元，将局部极坐标写为
+        \((\varrho,\psi)\)。孔径总质量为：</p>
+      \[
+      \begin{aligned}
+      \int_{\Gamma_j}f_a(\varrho)\,dS
+      &=
+      \int_0^{2\pi}\int_0^a
+      \frac{\varrho}
+      {2\pi a\sqrt{a^2-\varrho^2}}
+      \,d\varrho\,d\psi\\
+      &=
+      \frac{1}{a}
+      \int_0^a
+      \frac{\varrho}{\sqrt{a^2-\varrho^2}}
+      \,d\varrho\\
+      &=1.
+      \end{aligned}
+      \]
+
+      <p>所以 \(A_j=1\) 表示所有阵元具有相同的单位积分源强，不依赖孔径覆盖了多少网格点。</p>
+
+      <div class="warn">
+        \(f_a\) 在 \(\varrho\to a^-\) 时趋于无穷，但奇性可积，总质量有限。
+        数值实现通过变量替换和 Gauss 求积避免直接在边缘求值。
+      </div>
+    </section>
+
+    <section id="transform">
+      <h2>孔径傅里叶变换</h2>
+
+      <p>由于 \(f_a\) 轴对称，其二维傅里叶变换只依赖
+        \(q=\|\mathbf q\|\)：</p>
+      \[
+      \begin{aligned}
+      F_a(q)
+      &=
+      \int_{\Gamma_0}
+      f_a(\varrho)e^{-i\mathbf q\cdot\boldsymbol\xi}\,dS\\
+      &=
+      2\pi
+      \int_0^a
+      f_a(\varrho)J_0(q\varrho)\varrho\,d\varrho\\
+      &=
+      \frac{1}{a}
+      \int_0^a
+      \frac{\varrho J_0(q\varrho)}
+      {\sqrt{a^2-\varrho^2}}
+      \,d\varrho.
+      \end{aligned}
+      \]
+
+      <p>令 \(\varrho=a\sin\alpha\)，则：</p>
+      \[
+      F_a(q)
+      =
+      \int_0^{\pi/2}
+      \sin\alpha\,
+      J_0(aq\sin\alpha)\,d\alpha.
+      \]
+
+      <p>为了不直接引用积分表，展开 Bessel 函数：</p>
+      \[
+      J_0(z\sin\alpha)
+      =
+      \sum_{m=0}^{\infty}
+      \frac{(-1)^m}{(m!)^2}
+      \left(\frac{z^2\sin^2\alpha}{4}\right)^m.
+      \]
+
+      <p>并使用：</p>
+      \[
+      \int_0^{\pi/2}\sin^{2m+1}\alpha\,d\alpha
+      =
+      \frac{2^{2m}(m!)^2}{(2m+1)!}.
+      \]
+
+      <p>逐项积分得到：</p>
+      \[
+      \begin{aligned}
+      F_a(q)
+      &=
+      \sum_{m=0}^{\infty}
+      \frac{(-1)^m(aq)^{2m}}{(2m+1)!}\\
+      &=
+      \frac{\sin(aq)}{aq}.
+      \end{aligned}
+      \]
+
+      <p>若采用 NumPy/官方常用的归一化定义：</p>
+      \[
+      \operatorname{sinc}(x)
+      =
+      \frac{\sin(\pi x)}{\pi x},
+      \]
+      <p>则：</p>
+      \[
+      \boxed{
+      F_a(q)
+      =
+      \operatorname{sinc}\!\left(\frac{aq}{\pi}\right)
+      }.
+      \]
+    </section>
+
+    <section id="far-field">
+      <h2>远场渐近与官方公式</h2>
+
+      <p>对第 \(j\) 个阵元写：</p>
+      \[
+      \mathbf s=\mathbf c_j+\boldsymbol\xi,
+      \qquad
+      \mathbf R_j=\mathbf x-\mathbf c_j,
+      \qquad
+      R_j=\|\mathbf R_j\|.
+      \]
+
+      <p>当 \(R_j\gg a\) 时：</p>
+      \[
+      |\mathbf R_j-\boldsymbol\xi|
+      =
+      R_j-\widehat{\mathbf R}_j\cdot\boldsymbol\xi
+      +
+      O\!\left(\frac{a^2}{R_j}\right),
+      \]
+      \[
+      \frac{1}{|\mathbf R_j-\boldsymbol\xi|}
+      =
+      \frac{1}{R_j}
+      \left[
+      1+O\!\left(\frac{a}{R_j}\right)
+      \right].
+      \]
+
+      <p>代入精确孔径积分：</p>
+      \[
+      \begin{aligned}
+      p_j(\mathbf x)
+      &=
+      A_j e^{i\phi_j}
+      \frac{e^{ikR_j}}{R_j}
+      \left[
+      \int_{\Gamma_0}
+      f_a(\|\boldsymbol\xi\|)
+      e^{-ik\widehat{\mathbf R}_{j,\parallel}
+      \cdot\boldsymbol\xi}
+      \,dS\\
+      &\quad+
+      O\!\left(\frac{a}{R_j}+\frac{ka^2}{R_j}\right)
+      \right].
+      \end{aligned}
+      \]
+
+      <p>若 \(\theta_j\) 是观察方向与阵元法线的夹角，则：</p>
+      \[
+      \left\|
+      k\widehat{\mathbf R}_{j,\parallel}
+      \right\|
+      =
+      k\sin\theta_j.
+      \]
+
+      <p>使用上一节的傅里叶变换：</p>
+      \[
+      D(\theta_j)
+      =
+      \frac{\sin(ak\sin\theta_j)}
+      {ak\sin\theta_j}
+      =
+      \operatorname{sinc}
+      \left(
+      \frac{ak\sin\theta_j}{\pi}
+      \right).
+      \]
+
+      <p>所以：</p>
+      \[
+      \boxed{
+      p_j(\mathbf x)
+      \sim
+      A_j e^{i\phi_j}
+      D(\theta_j)
+      \frac{e^{ikR_j}}{R_j}
+      }.
+      \]
+
+      <p>线性叠加全部阵元：</p>
+      \[
+      \boxed{
+      p_{\mathrm{array}}(\mathbf x)
+      \sim
+      \sum_{j=1}^{M}
+      A_j e^{i\phi_j}
+      D(\theta_j)
+      \frac{e^{ikR_j}}{R_j}
+      }.
+      \]
+
+      <div class="theorem">
+        <strong>与官方模型的对应。</strong>
+        官方模型中的阵元位置、\(R_j\)、\(\theta_j\)、相位因子
+        \(e^{i\phi_j}\)、球面传播项 \(e^{ikR_j}/R_j\) 和 sinc 方向图
+        \(D(\theta_j)\) 与上式逐项一致。因此这种匹配是由孔径分布的解析傅里叶变换
+        保证的，不是通过目标点拟合获得的。
+      </div>
+    </section>
+
+    <section id="discrete">
+      <h2>离散实现与连续式的一致性</h2>
+
+      <h3>边缘奇性的变量替换</h3>
+      <p>代码令：</p>
+      \[
+      \mu=\cos\alpha,
+      \qquad
+      \varrho=a\sqrt{1-\mu^2}.
+      \]
+
+      <p>此时孔径质量元化为：</p>
+      \[
+      f_a(\varrho)\,\varrho\,d\varrho\,d\psi
+      =
+      \frac{1}{2\pi}\,d\mu\,d\psi.
+      \]
+
+      <p>因此在 \(\mu\in[0,1]\) 上使用 Gauss–Legendre 求积、在
+        \(\psi\in[0,2\pi)\) 上使用均匀求积，即可消除边缘奇性并保持总质量为 1。</p>
+
+      <h3>双线性沉积与有限体积 RHS</h3>
+      <p>每个求积点被双线性沉积到相邻四个 \(xy\) 节点。四个权重之和为 1，
+        因此每个阵元列保持：</p>
+      \[
+      \sum_i M_{i,j}=1.
+      \]
+
+      <p>底面外法向指向 \(-z\)，将外向通量移到离散方程右端并除以控制体积
+        \(h^3\)，得到代码中的源列：</p>
+      \[
+      S_{\mathrm{bottom}}
+      =
+      -\frac{2\pi}{\rho_{\mathrm{ref}}h^3}M.
+      \]
+
+      <p>定义固定幅值源矩阵：</p>
+      \[
+      B=S\,\operatorname{diag}(A_1,\ldots,A_M),
+      \]
+      <p>则完整离散系统为：</p>
+      \[
+      \mathcal A p(\phi)
+      =
+      B e^{i\phi}.
+      \]
+
+      <p>这里 \(\mathcal A\) 是 Helmholtz 系统矩阵，避免与阵元幅值 \(A_j\)
+        混淆。相位变化只改变 RHS，固定场景下可以复用矩阵与分解因子。</p>
+
+      <table>
+        <thead>
+          <tr><th>连续量</th><th>代码实现</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>孔径求积 \(f_a\,dS\)</td>
+            <td><code>aperture_quadrature()</code></td>
+          </tr>
+          <tr>
+            <td>单位质量孔径矩阵 \(M\)</td>
+            <td><code>source_mass_matrix()</code></td>
+          </tr>
+          <tr>
+            <td>保守有限体积源列 \(S\)</td>
+            <td><code>flux_rhs_columns()</code></td>
+          </tr>
+          <tr>
+            <td>\(S(A\odot e^{i\phi})\)</td>
+            <td><code>WarpAssemblyEngine.assemble_rhs()</code></td>
+          </tr>
+          <tr>
+            <td>独立孔径积分验证</td>
+            <td><code>aperture_field()</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="note">
+        均匀自由场的内部表面凝聚与完整三维直接求解使用相同的孔径质量矩阵和
+        Neumann RHS。它们只采用不同的线性代数求解方式，不是两套物理模型。
+      </p>
+    </section>
+  </div>
+
+  <section id="scope">
+    <h2>等价范围与现实模型边界</h2>
+
+    <table>
+      <thead>
+        <tr><th>结论</th><th>成立范围</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PDE 孔径积分与官方 sinc 公式相同</td>
+          <td>远场主项严格相同；误差由有限距离渐近项控制</td>
+        </tr>
+        <tr>
+          <td>近场完整复声压处处相同</td>
+          <td>不成立；PDE 保留精确孔径近场，官方公式是远场近似</td>
+        </tr>
+        <tr>
+          <td>反射、障碍物和变材料仍可使用官方解析公式</td>
+          <td>不成立；这些场景由 PDE 继续求解</td>
+        </tr>
+        <tr>
+          <td>等效源等于真实压电换能器全部细节</td>
+          <td>不成立；振膜模态、互耦、损耗和制造误差仍需实测标定</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>当前自由场数值对齐结果提供了离散层面的工程证据：</p>
+    <ul>
+      <li>中心与偏轴目标的两模型最优振幅差约 \(0.53\%\) 与 \(0.48\%\)。</li>
+      <li>官方相位输入 PDE 后达到 PDE 单点上限的 \(99.928\%\) 与 \(99.912\%\)。</li>
+      <li>PDE 相位输入官方模型后达到官方上限的 \(99.928\%\) 与 \(99.912\%\)。</li>
+      <li>扩展目标的官方模型振幅效率为 \(99.879\%\)–\(99.921\%\)。</li>
+    </ul>
+
+    <p>这些数据验证官方参考模型与当前离散 PDE 的工程一致性，不构成绝对声压硬件标定。
+      完整数值证据见 <a href="PDE_PHASE_ALIGNMENT.md">PDE_PHASE_ALIGNMENT.md</a>。</p>
+  </section>
+
+  <section>
+    <h2>当前生产配置</h2>
+    <pre><code>transducer_specs:
+  frequency: 40000.0
+  diameter: 0.009
+  pitch: 0.0105
+  array_n: 16
+  geometry: sonicsurface_reference
+  source_radial_order: 64
+  source_angular_order: 256
+
+boundary_conditions:
+  "-x": open
+  "+x": open
+  "-y": open
+  "+y": open
+  "-z": reflecting
+  "+z": open</code></pre>
+  </section>
+
+  <footer>
+    继续阅读：
+    <a href="PHYSICAL_MODEL_ALIGNMENT_AND_BACKEND.md">物理模型修正与后端整理</a> ·
+    <a href="HELMHOLTZ_DISCRETIZATION.html">有限体积离散</a> ·
+    <a href="PDE_PHASE_ALIGNMENT.md">官方相位对齐证据</a>
+  </footer>
+</main>
+</body>
+</html>

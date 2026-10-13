@@ -54,10 +54,10 @@
       <text x="84" y="301" class="head blue">换能器阵列与声源标定</text>
       <rect x="88" y="322" width="168" height="140" fill="url(#array-grid)"/>
       <text x="283" y="350" class="t">频率 f、间距、直径</text>
-      <text x="283" y="386" class="t">SPL 与测量距离 → P₀</text>
-      <text x="283" y="422" class="t">位置、圆盘覆盖与编号</text>
+      <text x="283" y="386" class="t">单位质量 sinc 孔径求积</text>
+      <text x="283" y="422" class="t">位置、孔径沉积与编号</text>
       <text x="88" y="494" class="math">M = n²；阵元幅值固定，相位 φ 可调</text>
-      <text x="88" y="531" class="t">底面 Dirichlet：u = P₀ exp(iφᵣ)</text>
+      <text x="88" y="531" class="t">底面 Neumann：B exp(iφᵣ)</text>
       <text x="88" y="568" class="code">physics/transducer_array.py</text>
     </g>
     <g id="mesh-input">

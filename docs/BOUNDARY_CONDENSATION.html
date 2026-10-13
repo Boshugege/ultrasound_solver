@@ -68,6 +68,11 @@
   <h1>边界凝聚：到底优化了什么，怎样优化？</h1>
   <p class="lead">把“已经知道怎么由别的点算出来”的边界声压，先代入其他方程。大型求解器只解剩下的未知量，最后再恢复边界。</p>
   <p class="note"><strong>最重要的区别：</strong>我们优化的是<strong>同一个离散声场方程组的求解方式</strong>，不是换物理模型、删掉障碍物、忽略边界，也不是在这里优化换能器相位。</p>
+  <p class="warn"><strong>当前实现口径：</strong>sinc Neumann 声源以及 open、impedance
+    等 Robin/Neumann 自然边界都保留在保守 PDE 行中，不再按早期“两元素边界行”
+    递归消元。下文 Schur 补仍说明通用代数原理；生产代码只消去经过结构检查的
+    Dirichlet 规定值自由度。均匀自由场的 x/y 特征分解与 z 消元是另一种与完整
+    PDE 等价的内部表面凝聚实现。</p>
 
   <nav aria-label="阅读目录">
     <ul>
@@ -87,7 +92,9 @@
     <h2>1. 原来的求解贵在哪里？</h2>
     <p>三维空间离散成网格后，每个网格点对应一个复声压未知量。原系统写成 <code>A u = b</code>：<code>A</code> 描述点与点之间的耦合，<code>b</code> 描述激励，<code>u</code> 是要解的完整声场。</p>
     <p>直接求解通常分两步：先对 <code>A</code> 做<strong>矩阵分解</strong>，再用分解结果对 <code>b</code> 做<strong>回代</strong>。分解不仅需要计算，过程中还可能产生原矩阵没有的非零元素，称为<strong>填充</strong>，这些分解因子会占用大量内存或显存。</p>
-    <p>当前装配中，内部点之间的耦合是对称的，但指定声压行和开放边界行使用不同的方程形式，破坏了整个矩阵的对称性。直接把完整矩阵交给一般非对称求解器，没有利用到内部系统原本具有的结构。</p>
+    <p>当前保守装配让内部、reflecting、open、impedance 和 sinc Neumann 源面保持
+      统一的复对称结构；只有 soft 等规定值行需要单独处理。边界凝聚的目标是在不改变
+      离散问题的前提下消去这类可验证的规定值自由度。</p>
     <div class="columns">
       <article><h3>直接处理原系统</h3><p>所有未知量一起进入大型分解；矩阵包含破坏对称性的边界行。</p></article>
       <article><h3>先做边界凝聚</h3><p>先代入简单边界关系，再分解更小、经过检查的复对称系统，最后恢复完整声场。</p></article>
@@ -100,10 +107,11 @@
     <div class="table-wrap"><table>
       <thead><tr><th>点的类型</th><th>声压关系</th><th>当前处理方式</th></tr></thead>
       <tbody>
-        <tr><td>换能器指定声压点</td><td>声压已由阵元幅值和相位给定。</td><td>从大型系统消去；已知值的影响移入右端。</td></tr>
-        <tr><td>开放边界点</td><td>边界方程把该点声压与一个向内邻居联系起来。</td><td>沿依赖关系代入其他方程；求解后恢复。</td></tr>
+        <tr><td>soft 等规定值点</td><td>声压由 Dirichlet 条件给定。</td><td>可从大型系统消去；已知值的影响移入右端。</td></tr>
+        <tr><td>sinc Neumann 孔径</td><td>在 reflecting 控制体积上注入通量 RHS。</td><td>不产生规定值自由度，不参与 Dirichlet 消元。</td></tr>
+        <tr><td>open / impedance 点</td><td>局部面通量累加到保守 PDE 行。</td><td>保留，不按旧式两元素行消元。</td></tr>
         <tr><td>普通内部点</td><td>需要综合相邻点耦合求解。</td><td>保留，交给大型直接求解器。</td></tr>
-        <tr><td>刚性反射边界点</td><td>当前实现仍使用保留对称耦合的差分行。</td><td>通常保留；若同时属于指定点或开放面，则按消去集合处理。</td></tr>
+        <tr><td>刚性反射边界点</td><td>零外向通量的保守控制体积行。</td><td>保留；若同时是 soft 规定值点则按 Dirichlet 处理。</td></tr>
       </tbody>
     </table></div>
     <p>文档后面的 <code>E</code> 表示<strong>先消去、后恢复</strong>的点，<code>R</code> 表示<strong>保留并参与大型求解</strong>的点。这是按方程结构分组，不是把物理空间挖掉一部分。障碍物材料造成的散射仍然在原方程中。</p>
@@ -256,14 +264,17 @@ u_q = 3u_r + 4
     <p><strong>Schur 补不是额外的神秘求解器。它就是“把边界关系代入后，内部方程的新系数矩阵”。</strong></p>
 
     <details id="actual-boundary">
-      <summary>补充：真实开放边界的乘数从哪里来？</summary>
-      <p>当前一阶 Sommerfeld 离散为：</p>
+      <summary>历史说明：早期两元素 open 行为何不再使用？</summary>
+      <p>早期一阶 Sommerfeld 离散曾写为：</p>
       <pre><code>(1/h − i k₀) u_e − (1/h) u_q = b_e
 
 整理：
 u_e = [1 / (1 − i k₀h)] u_q + b_e / (1/h − i k₀)</code></pre>
-      <p>h 是网格间距，k₀ 是背景波数，i 是虚数单位，q 是当前选中的向内邻居。通常前向开放边界右端 b<sub>e</sub> 为零，但通用 RHS 和伴随求解需要保留已知项处理。代码直接从已装配矩阵读取系数，并非另行猜测边界乘数。</p>
-      <p>指定声压行则是 <code>u_e = P₀ exp(iφ)</code>。它只影响右端，不增加对保留未知量的依赖。</p>
+      <p>这种整行替换会丢弃原 PDE 的其他切向通量，并且在棱角只能选择一个面。
+        当前实现改为把局部 <code>iω/(ρc)</code> 或 <code>iω/Z</code> 面通量累加到
+        原控制体积行；Robin/Neumann 点因此保留在大型系统中。</p>
+      <p>当前规定值行仅来自 soft 等 Dirichlet 条件；阵元使用 sinc Neumann 通量，
+        不再是 <code>u_e=P₀exp(iφ)</code>。</p>
     </details>
 
     <details id="equivalence">
@@ -308,11 +319,14 @@ Sᴴ λ_R = r_R</code></pre>
     <p class="note">本页没有给出固定加速倍数。相位优化中 Adam 与 L-SHADE 的达标时间比较，不能拿来当作边界凝聚的性能实验；它们测的是不同层面的算法。</p>
 
     <h3>适用条件与失败保护</h3>
-    <p>当前实现假定指定点来自单位 Dirichlet 行，开放边界行只有自身和一个邻居；递归依赖必须无环，A<sub>EE</sub> 必须可解，S 必须通过复对称检查。代码检查开放行的两项结构、依赖循环和对称误差；单位 Dirichlet 行由装配器保证，不能把任意行标成指定点后期待它自动适配。</p>
-    <p>高阶多邻居开放边界、PML 或其他离散方式不自动满足这些条件，必须重新分析，不能跳过保护检查强行套用。</p>
+    <p>当前指定值点必须来自可验证的 Dirichlet 单位行；递归依赖必须无环，
+      A<sub>EE</sub> 必须可解，S 必须通过复对称检查。sinc Neumann 孔径仅改变 RHS，
+      不应被标记为待消去的规定值点。</p>
+    <p>高阶多邻居开放边界、PML 或其他离散方式不自动满足旧式局部边界递归条件，
+      必须按当前保守矩阵结构重新分析，不能跳过保护检查强行套用。</p>
     <h3>源码对应</h3>
     <ul>
-      <li><a href="../src/algorithm/physics/warp_utils.py">warp_utils.py</a>：组装指定声压、开放边界和内部/反射差分行。</li>
+      <li><a href="../src/algorithm/physics/warp_utils.py">warp_utils.py</a>：准备材料场、sinc Neumann 源列和保守矩阵装配。</li>
       <li><a href="../src/algorithm/solvers/boundary_condensed_solver.py">boundary_condensed_solver.py</a>：<code>_eliminated_mask()</code> 分组；<code>_build_condensed_system()</code> 构造 T、S；<code>solve()</code> 修正右端并恢复边界；<code>solve_adjoint()</code> 复用因子求伴随。</li>
       <li><a href="../src/algorithm/solvers/cudss_hybrid_solver.py">cudss_hybrid_solver.py</a>：复对称下三角输入、资源预分析、分解与重复回代。</li>
     </ul>

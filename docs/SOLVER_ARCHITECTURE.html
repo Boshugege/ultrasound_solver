@@ -89,7 +89,10 @@
 
   <h1>Helmholtz Solver Architecture</h1>
 
-  <p class="note">完整物理与矩阵组装推导见 <a href="ACOUSTIC_PHYSICS_DERIVATION.html">ACOUSTIC_PHYSICS_DERIVATION.html</a>；边界凝聚数学原理见 <a href="BOUNDARY_CONDENSATION.html">BOUNDARY_CONDENSATION.html</a>；纯相位训练见 <a href="PHASE_ONLY_TRAINING.html">PHASE_ONLY_TRAINING.html</a>；精简版离散说明见 <a href="HELMHOLTZ_DISCRETIZATION.html">HELMHOLTZ_DISCRETIZATION.html</a>。</p>
+  <p class="note">当前唯一声源模型见 <a href="SINC_NEUMANN_SOURCE.html">SINC_NEUMANN_SOURCE.html</a>；
+    完整物理与矩阵组装推导见 <a href="ACOUSTIC_PHYSICS_DERIVATION.html">ACOUSTIC_PHYSICS_DERIVATION.html</a>；
+    边界凝聚数学原理见 <a href="BOUNDARY_CONDENSATION.html">BOUNDARY_CONDENSATION.html</a>；
+    纯相位训练见 <a href="PHASE_ONLY_TRAINING.html">PHASE_ONLY_TRAINING.html</a>。</p>
 
   <h2>固定矩阵、相位相关右端</h2>
 
@@ -99,7 +102,8 @@
   A u(\phi) = b(\phi)
   \]
 
-  <p>相位只出现在换能器 Dirichlet 右端中。定义 \(B\) 的第 \(r\) 列为第 \(r\) 个阵元在零相位时的边界激励，则：</p>
+  <p>相位只出现在换能器 sinc Neumann 通量右端中。定义 \(B\) 的第 \(r\) 列为
+    第 \(r\) 个阵元在零相位时的归一化有限孔径通量 RHS，则：</p>
 
   \[
   b(\phi) = B w(\phi),
@@ -114,7 +118,9 @@
     <li>后续调用：只更新 \(b(\phi)\)；高性能后端同时复用直接分解因子。</li>
   </ol>
 
-  <p>首次矩阵装配同时缓存底面阵元映射。后续相位更新由 <code>WarpAssemblyEngine.assemble_rhs()</code> 直接在有效 Dirichlet 点上用 NumPy <code>complex128</code> 生成复数 RHS，不再遍历整个体网格。</p>
+  <p>首次矩阵装配同时缓存稀疏孔径源列。后续相位更新由
+    <code>WarpAssemblyEngine.assemble_rhs()</code> 计算
+    \(B(A\odot e^{i\phi})\)，不再重建矩阵或遍历整个体网格。</p>
 
   <h2>Phase-Only 优化路径</h2>
 
@@ -143,7 +149,8 @@
       </tr>
       <tr>
         <td><code>cudss_hybrid_direct</code></td>
-        <td>精确凝聚 Dirichlet/Open 边界后，对复对称约化矩阵执行 cuDSS 分解；持久复用 factorization；自动选择 hybrid execute 或 hybrid memory。</td>
+        <td>对可消元边界做精确凝聚后，对复对称约化矩阵执行 cuDSS 分解；
+          sinc Neumann 源保留为 RHS；持久复用 factorization。</td>
         <td>适合需要精确直接求解和因子复用的场景；实际可用规模取决于稀疏结构、GPU 显存与主存。</td>
       </tr>
     </tbody>
@@ -153,7 +160,9 @@
 
   <p>完整块分解证明、稀疏传递矩阵构造和同因子伴随推导见 <a href="BOUNDARY_CONDENSATION.html">BOUNDARY_CONDENSATION.html</a>。</p>
 
-  <p><code>BoundaryCondensedDirectSolver</code> 负责该步骤。原始矩阵由于 Dirichlet 单位行和 Sommerfeld 单边行不是对称矩阵，但所有保留的内部及 reflecting stencil 都是复对称的。把未知量分为保留自由度 \(R\) 和待消去边界自由度 \(E\)：</p>
+  <p><code>BoundaryCondensedDirectSolver</code> 负责该步骤。soft 等 Dirichlet 行可以消元；
+    sinc Neumann 孔径不替换矩阵行，只向 reflecting 底面的保守控制体积 RHS 注入通量。
+    把未知量分为保留自由度 \(R\) 和待消去边界自由度 \(E\)：</p>
 
   \[
   \begin{bmatrix}

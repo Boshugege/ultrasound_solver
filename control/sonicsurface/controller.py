@@ -6,6 +6,7 @@ import hashlib
 import logging
 import threading
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from .config import SonicSurfaceConfig
 from .protocol import (
     CHANNELS,
     PHASE_DIVISIONS,
+    START_PHASES,
     compile_all_off,
     compile_pattern,
     compile_swap,
@@ -28,6 +30,8 @@ MAX_MODULATION_HZ = 500.0
 MIN_DUTY_CYCLE = 0.05
 MAX_DUTY_CYCLE = 0.95
 MAX_DURATION_S = 3600.0
+SERIAL_WRITE_TIMEOUT_S = 3.0
+SERIAL_REOPEN_SETTLE_S = 2.0
 
 
 def triangle_sweep_frequency(
@@ -58,9 +62,12 @@ class SonicSurfaceController:
 
         self.config = config
         self.live = live
+        self._serial_factory = serial_factory
         self._serial_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._serial = None
+        self._serial_recoveries = 0
+        self._last_serial_error: str | None = None
         self._last_submission: dict[str, Any] | None = None
         self._modulation_stop = threading.Event()
         self._modulation_thread: threading.Thread | None = None
@@ -80,18 +87,22 @@ class SonicSurfaceController:
         }
 
         if live:
-            if serial_factory is None:
+            if self._serial_factory is None:
                 try:
                     import serial
                 except ImportError as exc:
                     raise RuntimeError("缺少 pyserial，无法打开串口") from exc
-                serial_factory = serial.Serial
-            self._serial = serial_factory(
-                config.serial_port,
-                config.baudrate,
-                timeout=1,
-                write_timeout=1,
-            )
+                self._serial_factory = serial.Serial
+            self._serial = self._open_serial()
+
+    def _open_serial(self) -> Any:
+        assert self._serial_factory is not None
+        return self._serial_factory(
+            self.config.serial_port,
+            self.config.baudrate,
+            timeout=1,
+            write_timeout=SERIAL_WRITE_TIMEOUT_S,
+        )
 
     def status(self) -> dict[str, Any]:
         with self._state_lock:
@@ -107,19 +118,60 @@ class SonicSurfaceController:
             "calibration_mode": self.config.calibration_mode,
             "calibration_verified": self.config.calibration_verified,
             "live": self.live,
+            "serial_connected": self._serial is not None,
+            "serial_recoveries": self._serial_recoveries,
+            "last_serial_error": self._last_serial_error,
             "last_submission": self._last_submission,
             "modulation": modulation,
         }
 
+    def _write_once_locked(self, data: bytes) -> None:
+        assert self._serial is not None
+        written = self._serial.write(data)
+        self._serial.flush()
+        if written is not None and written != len(data):
+            raise IOError(f"串口仅写入 {written}/{len(data)} 字节")
+
+    def _reopen_serial_locked(self) -> None:
+        previous = self._serial
+        self._serial = None
+        if previous is not None:
+            with suppress(Exception):
+                previous.close()
+        self._serial = self._open_serial()
+        # Arduino-class USB serial bridges commonly reset when the port opens.
+        # Wait for the bootloader/application before resending the full frame.
+        time.sleep(SERIAL_REOPEN_SETTLE_S)
+        self._serial_recoveries += 1
+
     def _send_bytes(self, data: bytes) -> bool:
         if not self.live:
             return False
-        assert self._serial is not None
         with self._serial_lock:
-            written = self._serial.write(data)
-            self._serial.flush()
-        if written is not None and written != len(data):
-            raise IOError(f"串口仅写入 {written}/{len(data)} 字节")
+            try:
+                self._write_once_locked(data)
+                self._last_serial_error = None
+            except (IOError, OSError) as exc:
+                self._last_serial_error = str(exc)
+                is_complete_frame = (
+                    len(data) >= CHANNELS + 2
+                    and data[0] == START_PHASES
+                )
+                if not is_complete_frame:
+                    raise
+                LOGGER.warning(
+                    "完整相位帧写入失败，重开串口后重发一次：%s",
+                    exc,
+                )
+                self._reopen_serial_locked()
+                try:
+                    # 0xFE resets the FPGA byte counter, so resending a
+                    # complete frame safely replaces any partial frame.
+                    self._write_once_locked(data)
+                    self._last_serial_error = None
+                except (IOError, OSError) as retry_exc:
+                    self._last_serial_error = str(retry_exc)
+                    raise
         return True
 
     def _result(self, frame: bytes, transmitted: bool, source: str) -> dict[str, Any]:

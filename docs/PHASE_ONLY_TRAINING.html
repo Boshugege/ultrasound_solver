@@ -89,7 +89,9 @@
 
   <h1>Fixed-Scene Phase Optimization with a Full-Field Response Basis</h1>
 
-  <p class="note">本文档只描述当前已实现的固定场景 phase-only 优化。响应基由选定的 Helmholtz 求解后端离线构建，随后作为在线优化的精确缓存层。物理模型见 <a href="ACOUSTIC_PHYSICS_DERIVATION.html">ACOUSTIC_PHYSICS_DERIVATION.html</a>；完整梯度推导见 <a href="GRADIENT_DERIVATION.html">GRADIENT_DERIVATION.html</a>。</p>
+  <p class="note">本文档只描述当前已实现的固定场景 phase-only 优化。
+    当前源矩阵来自 <a href="SINC_NEUMANN_SOURCE.html">sinc Neumann 有限孔径通量</a>；
+    响应基由 Helmholtz 求解器离线构建，随后作为在线优化的精确缓存层。</p>
 
   <p>优化变量仅为 <code>M</code> 个换能器相位。障碍物、材料、边界、频率、阵元位置和阵元幅值在一次优化期间保持不变；改变其中任一项都必须重新构建响应基。</p>
 
@@ -114,7 +116,9 @@
   \end{bmatrix}
   \]
 
-  <p>定义源矩阵 \(B\in\mathbb{C}^{N\times M}\)。第 \(r\) 列只在第 \(r\) 个换能器覆盖的 Dirichlet 网格点上取配置幅值 \(A_r\)，其他位置为零。于是：</p>
+  <p>定义源矩阵 \(B\in\mathbb{C}^{N\times M}\)。第 \(r\) 列是第 \(r\) 个阵元
+    归一化 sinc Neumann 孔径经求积、双线性沉积和有限体积缩放后形成的稀疏 RHS，
+    再乘固定阵元幅值 \(A_r\)；归一化孔径质量为 1。于是：</p>
 
   \[
   b(\phi)=Bw(\phi)
@@ -167,7 +171,7 @@
     <li>障碍物散射。</li>
     <li>Reflecting 边界。</li>
     <li>Open Sommerfeld 边界。</li>
-    <li>换能器有限圆盘覆盖。</li>
+    <li>归一化 sinc Neumann 有限孔径通量。</li>
   </ul>
 
   <p>其误差只来自构建 \(G\) 时的直接求解残差和浮点误差，不额外引入物理近似。</p>
