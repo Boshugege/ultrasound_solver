@@ -8,6 +8,21 @@ from algorithm.physics.sinc_aperture import source_mass_matrix, flux_rhs_columns
 wp.init()
 
 
+def blend_obstacle_material(h, rho_obstacle, c_obstacle, rho_medium, c_medium):
+    """Density and sound speed across a smoothed obstacle interface.
+
+    ``h`` runs from 0 inside the obstacle to 1 in the medium. The coefficients that
+    enter the equation, 1/rho (flux) and 1/(rho c^2) (mass), are blended linearly,
+    so the transition is centred on the SDF zero level. Blending rho itself makes a
+    dense obstacle acoustically rigid well outside the zero level: a rho = 1250
+    sphere in air then scatters like a rigid sphere ~1 cell larger.
+    """
+    inv_rho = 1/rho_obstacle+(1/rho_medium-1/rho_obstacle)*h
+    compressibility = (1/(rho_obstacle*c_obstacle**2)
+                       +(1/(rho_medium*c_medium**2)-1/(rho_obstacle*c_obstacle**2))*h)
+    return 1/inv_rho, np.sqrt(inv_rho/compressibility)
+
+
 class WarpAssemblyEngine:
     def __init__(self, nx: int, ny: int, nz: int, device: str = "cuda"):
         self.nx, self.ny, self.nz = nx, ny, nz
@@ -59,8 +74,7 @@ class WarpAssemblyEngine:
             material = obs_cfg.get("material", {})
             rho_obs = float(material.get("density", 1250.))
             c_obs = float(material.get("sound_speed", 2200.))
-            rho = rho_obs+(rho0-rho_obs)*h
-            c = c_obs+(c0-c_obs)*h
+            rho, c = blend_obstacle_material(h, rho_obs, c_obs, rho0, c0)
         else:
             rho, c = np.full(shape, rho0), np.full(shape, c0)
         self.rho_field = wp.from_numpy(np.asarray(rho, dtype=np.float64), dtype=wp.float64, device=self.device)
