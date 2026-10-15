@@ -18,7 +18,9 @@ class PhaseResponseBasis:
     G @ exp(1j * phases), without another PDE solve.
     """
 
-    FORMAT_VERSION = 2
+    # 3: mesh_to_sdf takes the inside/outside decision from ray casting; bases built
+    # from mesh obstacles with earlier versions used a wrongly signed SDF.
+    FORMAT_VERSION = 3
 
     def __init__(
         self,

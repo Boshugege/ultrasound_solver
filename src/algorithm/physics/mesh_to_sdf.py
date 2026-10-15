@@ -138,9 +138,14 @@ def mesh_to_sdf(
         origin=tuple(float(value) for value in origin),
     )
     sampled = grid.compute_implicit_distance(oriented, inplace=False)
-    sdf = np.asarray(sampled.point_data["implicit_distance"]).reshape(
-        tuple(grid_size), order="F"
-    )
+    distance = np.abs(np.asarray(sampled.point_data["implicit_distance"]))
+    # The sign of vtkImplicitPolyDataDistance comes from the normal of the closest
+    # facet and is wrong wherever the closest point lies on an edge or vertex
+    # (24 % of the obstacle study's grid was marked as inside the hand). Take the
+    # inside/outside decision from ray casting against the closed surface instead.
+    enclosed = grid.select_enclosed_points(oriented, tolerance=1e-9, check_surface=True)
+    inside = np.asarray(enclosed.point_data["SelectedPoints"]).astype(bool)
+    sdf = np.where(inside, -distance, distance).reshape(tuple(grid_size), order="F")
     sdf = np.asarray(sdf, dtype=np.float32)
     if not np.isfinite(sdf).all():
         raise RuntimeError("Generated SDF contains NaN or infinite values")
