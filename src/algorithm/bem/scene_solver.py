@@ -126,12 +126,14 @@ class BemSceneSolver:
         self._near = aperture_sources(centers, diameter, *self.near_source_orders)
         self._direct = Apertures(centers, diameter, self.near_source_orders)
         self._scattered = Apertures(centers, diameter, self.source_orders)
-        self._obs_sdf = self._sdf()
-        self._grid = self._grid_points()
+        self._obs_sdf = None
+        self._grid = None  # sample points and SDF are built on first use: target responses need neither
 
     # ---- pipeline interface -------------------------------------------------
     @property
     def obstacle_sdf(self):
+        if self._obs_sdf is None and self.cfg.obstacles:
+            self._obs_sdf = self._sdf()
         return self._obs_sdf
 
     def set_phases(self, phases):
@@ -251,6 +253,8 @@ class BemSceneSolver:
                 U[:, column], info = bem.solve(b, rtol=self.rtol)
                 if not info.converged:
                     raise RuntimeError(f"BEM GMRES did not converge ({info.iterations} iterations)")
+        if self._grid is None:
+            self._grid = self._grid_points()
         fields = np.empty((self.total_dofs, weight_columns.shape[1]), dtype=np.complex128)
         for start in range(0, self.total_dofs, point_chunk):
             points = cp.asarray(self._grid[start:start + point_chunk])
@@ -260,8 +264,8 @@ class BemSceneSolver:
                 rows = slice(first, first + emitter_chunk)
                 block += self._incident(points, emitters[rows], weight_columns[rows])
             fields[start:start + point_chunk] = cp.asnumpy(block)
-        if self._obs_sdf is not None:
-            fields[self._obs_sdf.reshape(-1, order="F") < 0] = 0.0
+        if self.obstacle_sdf is not None:
+            fields[self.obstacle_sdf.reshape(-1, order="F") < 0] = 0.0
         return fields
 
 
