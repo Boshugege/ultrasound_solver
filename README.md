@@ -11,6 +11,7 @@
 - 使用刚性挡板上的归一化 `sinc_neumann` 有限孔径通量源；支持局部 open、
   reflecting、soft、impedance 边界及 PML。
 - 支持多种求解后端：`gpu_iterative`、`gpu_direct`、`cudss_hybrid_direct`。
+- 支持刚性障碍物边界元后端 `bem`：只离散障碍物表面，声源与 PDE 相同，可为运动的手等障碍物实时计算聚焦相位。
 - 支持边界凝聚直接法，降低大规模直接求解的显存压力。
 - 支持固定场景的相位响应基：
 
@@ -90,6 +91,7 @@ python src/algorithm/visualizer.py outputs/phase_oblique_reflecting_x_16x16/resu
 - [`docs/PHASE_ONLY_TRAINING.html`](docs/PHASE_ONLY_TRAINING.html)：固定场景下的相位响应基训练。
 - [`docs/GRADIENT_DERIVATION.html`](docs/GRADIENT_DERIVATION.html)：振幅 loss 导数、相位 VJP、PDE 伴随梯度和有限差分验证。
 - [`docs/SOLVER_ARCHITECTURE.html`](docs/SOLVER_ARCHITECTURE.html)：求解器架构和模块边界。
+- [`docs/BEM_REALTIME_FOCUSING.md`](docs/BEM_REALTIME_FOCUSING.md)：刚性障碍物边界元后端、与 PDE 的对照验证和实时聚焦。
 - [`algorithm_comparison/README.md`](algorithm_comparison/README.md)：已完成的 9 种算法对比、质量门槛统计和复现实验入口。
 - [`gradient_ablation/README.md`](gradient_ablation/README.md)：已完成的解析梯度更新器消融、质量门槛统计和复现实验入口。
 - [`src/hardware/README.md`](src/hardware/README.md)：Ultraino/AcousticField 标定结果与本地 S/C 硬件服务的接入方式。

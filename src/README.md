@@ -146,7 +146,11 @@ algorithm_options:
 
 ### `solver`
 
-- `backend`: 求解后端，支持 `gpu_iterative`、`gpu_direct`、`cudss_hybrid_direct`。
+- `backend`: 求解后端，支持 `gpu_iterative`、`gpu_direct`、`cudss_hybrid_direct`、`bem`。
+  `bem` 为刚性障碍物边界元：声源与 PDE 相同，开放面为真实自由空间（忽略 `pml`），`-z` 必须是反射挡板、每个坐标轴至多一个反射面，不支持 `soft`/`impedance` 面和材料场；详见 [`docs/BEM_REALTIME_FOCUSING.md`](../docs/BEM_REALTIME_FOCUSING.md)。
+- `bem_elements_per_wavelength`: `bem` 障碍物表面单元边长 = 波长 / 该值，默认 5。
+- `bem_rtol`: `bem` 每次 GMRES 求解的相对残差，默认 `1e-5`。
+- `bem_source_orders` / `bem_near_source_orders`: `bem` 孔径求积阶数 `[径向, 方位]`，默认 `[8, 32]` / `[32, 128]`（后者用于离挡板不到一个孔径直径的网格点）。
 - `direct_residual_tol`: 直接法相对残差检查阈值。
 - `hybrid_num_threads`: cuDSS hybrid CPU 线程数。
 - `hybrid_execution_mode`: cuDSS hybrid 模式，支持 `auto`、`hybrid_execute`、`hybrid_memory`。
