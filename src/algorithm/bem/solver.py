@@ -76,6 +76,9 @@ def self_hypersingular(tri, k: float, angular=16, radial=8, xp=np):
     return total / (4.0 * np.pi)
 
 
+HALF_SCALE = 1024.0  # matrix entries are O(1); keeps small entries out of float16 subnormals
+
+
 @dataclass
 class SolveInfo:
     iterations: int
@@ -102,14 +105,77 @@ def image_group(planes):
     return np.array(signs), np.array(offsets)
 
 
+def spatial_blocks(points, size):
+    """Index sets of at most ``size`` neighbouring points (recursive median bisection)."""
+    blocks = []
+
+    def split(index):
+        if len(index) <= size:
+            blocks.append(index)
+            return
+        coordinates = points[index]
+        order = index[np.argsort(coordinates[:, np.argmax(np.ptp(coordinates, axis=0))])]
+        split(order[: len(order) // 2])
+        split(order[len(order) // 2:])
+
+    split(np.arange(len(points)))
+    return blocks
+
+
+class BlockJacobi:
+    """Inverse of the near-field diagonal blocks of a dense matrix (right preconditioner).
+
+    Elements are grouped into spatially compact blocks; ``solve`` applies the inverse
+    of the block diagonal, ``apply`` the block diagonal itself (to map a warm start
+    into the preconditioned variable)."""
+
+    def __init__(self, A, centroids, size=128):
+        blocks = spatial_blocks(np.asarray(centroids), size)
+        width = max(len(b) for b in blocks)
+        n = A.shape[0]
+        index = np.full((len(blocks), width), n, dtype=np.int64)  # n = padding slot
+        for row, b in enumerate(blocks):
+            index[row, :len(b)] = b
+        self.index = cp.asarray(index)
+        valid = self.index < n
+        rows = cp.where(valid, self.index, 0)
+        D = A[rows[:, :, None], rows[:, None, :]]
+        mask = valid[:, :, None] & valid[:, None, :]
+        D = cp.where(mask, D, 0)
+        D[:, cp.arange(width), cp.arange(width)] += cp.where(valid, 0, 1).astype(D.dtype)
+        self.blocks = D.astype(cp.complex64)
+        self.inverses = cp.linalg.inv(D).astype(cp.complex64)
+        self.n = n
+
+    def _multiply(self, matrices, v):
+        padded = cp.concatenate([v, cp.zeros(1, dtype=v.dtype)])
+        out = cp.zeros(self.n + 1, dtype=v.dtype)
+        out[self.index] = cp.matmul(matrices, padded[self.index][..., None])[..., 0]
+        return out[: self.n]
+
+    def solve(self, v):
+        return self._multiply(self.inverses, v)
+
+    def apply(self, v):
+        return self._multiply(self.blocks, v)
+
+
 class RigidBEM:
     """Rigid bodies (one closed surface or several) above/beside rigid planes.
 
     ``planes`` defaults to the transducer baffle z = 0. ``planes=()`` is free space.
     """
 
-    def __init__(self, vertices, faces, k, planes=((2, 0.0),), alpha=None):
+    def __init__(self, vertices, faces, k, planes=((2, 0.0),), alpha=None, block_size=None,
+                 half_precision=False):
         self.k = float(k)
+        self.block_size = block_size  # near-field block-Jacobi preconditioner, None = off
+        self.preconditioner = None
+        # Keep the matrix only as float16 real/imaginary parts (scaled by HALF_SCALE) for
+        # GMRES: half the memory traffic per product (for rtol >= 1e-3).
+        self.half_precision = half_precision
+        self._half = None
+        self._assembled = False
         self.planes = tuple(planes)
         self.images = image_group(self.planes)
         self.alpha = 1j / self.k if alpha is None else complex(alpha)
@@ -139,7 +205,9 @@ class RigidBEM:
         if not reuse_shape:
             self.hself = self_hypersingular(geo["triangles"], self.k, xp=cp)
             self.A_obstacle = None
+            self.preconditioner = None
         self.A = None
+        self._assembled = False
         cp.cuda.Stream.null.synchronize()
         self.geometry_seconds = time.perf_counter() - started
 
@@ -148,35 +216,54 @@ class RigidBEM:
         return self.geo["n"]
 
     def assemble(self):
-        """Full matrix; for a rigidly moved surface only the image part is recomputed."""
+        """Matrix; for a rigidly moved surface only the image part is recomputed (and
+        written on top of the body's own block in one pass)."""
         cp.cuda.Stream.null.synchronize()
         started = time.perf_counter()
+        half = HALF_SCALE if self.half_precision else None
+        previous = self._half if half else getattr(self, "_buffer", None)
         if self.n == 0:
-            self.A = cp.zeros((0, 0), dtype=cp.complex64)
+            self.A, self._half = cp.zeros((0, 0), dtype=cp.complex64), None
         elif len(self.images[0]) == 1:
             self.A = kernels.assemble(self.device, self.k, self.alpha, self.hself, self.images)
+            if half:  # free space: keep A (preconditioner) and add the float16 copy
+                self._half = ((self.A.real * half).astype(cp.float16), (self.A.imag * half).astype(cp.float16))
         else:
             if self.A_obstacle is None:
                 self.A_obstacle = kernels.assemble(self.device, self.k, self.alpha, self.hself,
                                                    self.images, 0, 1)
-            self.A = self.A_obstacle + kernels.assemble(self.device, self.k, self.alpha,
-                                                        self.hself, self.images, 1)
+            shape = None if previous is None else (previous[0] if half else previous).shape
+            reuse = previous if shape == self.A_obstacle.shape else None
+            if half:
+                self.A = None
+                self._half = kernels.assemble(self.device, self.k, self.alpha, self.hself, self.images, 1,
+                                              base=self.A_obstacle, out=reuse, half_scale=half)
+            else:
+                self.A = self._buffer = kernels.assemble(self.device, self.k, self.alpha, self.hself,
+                                                         self.images, 1, base=self.A_obstacle, out=reuse)
+        if self.block_size and self.preconditioner is None and self.n:
+            # the body's own blocks are invariant under rigid motion
+            own = self.A if self.A_obstacle is None else self.A_obstacle
+            self.preconditioner = BlockJacobi(own, cp.asnumpy(self.geo["centroids"]), self.block_size)
+        self._assembled = True
         cp.cuda.Stream.null.synchronize()
         self.assemble_seconds = time.perf_counter() - started
         return self.A
 
+    def apply(self, v):
+        """Product with the Burton-Miller matrix (float16 storage if enabled)."""
+        if self._half is None:
+            return self.A @ v
+        real, imag = self._half
+        X = cp.stack([v.real, v.imag], axis=1).astype(cp.float16)
+        P, Q = real @ X, imag @ X
+        return ((P[:, 0].astype(cp.float32) - Q[:, 1]) + 1j * (P[:, 1].astype(cp.float32) + Q[:, 0])) \
+            .astype(cp.complex64) / HALF_SCALE
+
     # ---- incident fields -------------------------------------------------
-    def _green_and_gradient(self, x, sources, weights, chunk=1024):
+    def _green_and_gradient(self, x, sources, weights):
         """sum_q w_q G(x, s_q) and its gradient in x; x (P,3), sources (Q,3)."""
-        values, gradients = [], []
-        for start in range(0, x.shape[0], chunk):
-            diff = x[start:start + chunk, None, :] - sources[None, :, :]
-            r = cp.linalg.norm(diff, axis=2)
-            g = cp.exp(1j * self.k * r) / (4 * np.pi * r)
-            gp = g * (1j * self.k - 1.0 / r)  # dG/dr
-            values.append(g @ weights)
-            gradients.append(cp.einsum("pq,pqd,q->pd", gp / r, diff, weights))
-        return cp.concatenate(values), cp.concatenate(gradients)
+        return kernels.monopoles(x, sources, weights, self.k)
 
     def point_source(self, x, source):
         """Monopole at ``source`` plus its images in the rigid planes."""
@@ -208,17 +295,23 @@ class RigidBEM:
         return self.rhs(*fn(self.geo["centroids"]))
 
     # ---- solve and evaluate ---------------------------------------------
-    def solve(self, b, x0=None, rtol=1e-5, restart=100, maxiter=500):
-        if self.A is None:
+    def solve(self, b, x0=None, rtol=1e-5, restart=100, maxiter=500, check_every=1):
+        if not self._assembled:
             self.assemble()
-        A = self.A
+        product = self.apply
         cp.cuda.Stream.null.synchronize()
         started = time.perf_counter()
-        result = gmres(lambda v: A @ v, b, x0=x0, rtol=rtol, restart=restart,
-                       maxiter=maxiter, xp=cp)
+        P = self.preconditioner
+        if P is None:
+            result = gmres(product, b, x0=x0, rtol=rtol, restart=restart,
+                           maxiter=maxiter, xp=cp, check_every=check_every)
+            solution = result.solution
+        else:  # right preconditioning: A P^-1 y = b, x = P^-1 y
+            result = gmres(lambda y: product(P.solve(y)), b, x0=None if x0 is None else P.apply(x0),
+                           rtol=rtol, restart=restart, maxiter=maxiter, xp=cp, check_every=check_every)
+            solution = P.solve(result.solution)
         cp.cuda.Stream.null.synchronize()
-        return result.solution, SolveInfo(result.iterations, time.perf_counter() - started,
-                                          result.converged)
+        return solution, SolveInfo(result.iterations, time.perf_counter() - started, result.converged)
 
     def scattered(self, points, u):
         """Scattered field at points for one surface density ``u``."""

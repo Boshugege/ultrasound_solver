@@ -3,10 +3,10 @@
 1. Mesh convergence of the response row at the focus (surface elements of
    lambda/3 ... lambda/6, GMRES rtol 1e-6) against lambda/6 (29k elements, the
    largest dense matrix that leaves room on a 24 GB GPU).
-2. Real-time frames at lambda/4 and lambda/5: one cold frame, then frames after the
-   hand moves by (2, 1, 1) mm while the focus stays put (rigid motion: the hand's own
-   matrix block is reused, the solve starts from the previous surface field), GMRES
-   rtol 1e-3 as used per frame. Moving hand and focus together is a pure
+2. Real-time frames at lambda/4 and lambda/5 with FocusSession's defaults: one cold
+   frame, then frames after the hand moves by (2, 1, 1) mm while the focus stays put
+   (rigid motion: the hand's own matrix block is reused, the solve starts from the
+   previous surface field). Moving hand and focus together is a pure
    translation along the baffle and would make the warm start exact.
 3. What the hand changes: focus pressure (fraction of the optimum in the BEM model
    with the hand) for phases computed without the hand vs with the hand.
@@ -50,7 +50,8 @@ def main():
     for per in (3, 4, 5, 6):
         vertices, faces = oriented_arrays(remesh(placed, wavelength / per))
         meshes[per] = (vertices, faces)
-        session = FocusSession(centers, cfg.specs.diameter, k=k, rtol=1e-6)
+        session = FocusSession(centers, cfg.specs.diameter, k=k, rtol=1e-6, scattered_orders=(6, 16),
+                               block_size=None, half_precision=False)
         session.set_surface(vertices, faces)
         rows[per] = session.response_row(target)
         print(f"lambda/{per}: {len(faces)} elements, {session.timings['iterations']} GMRES iterations", flush=True)
@@ -63,7 +64,7 @@ def main():
 
     for per in (4, 5):
         vertices, faces = meshes[per]
-        session = FocusSession(centers, cfg.specs.diameter, k=k, rtol=1e-3)
+        session = FocusSession(centers, cfg.specs.diameter, k=k)
 
         def frame(shift, rigid):
             cp.cuda.Stream.null.synchronize()
@@ -72,21 +73,21 @@ def main():
             row = session.response_row(target)
             total = time.perf_counter() - started
             t = session.timings
-            print(f"  geometry {t['geometry'] * 1e3:4.0f} + assemble {t['assemble'] * 1e3:4.0f} + solve "
-                  f"{t['solve'] * 1e3:4.0f} ({t['iterations']:2d} it) + aperture integrals "
-                  f"{(t['response'] - t['solve']) * 1e3:4.0f} = {total * 1e3:5.0f} ms", flush=True)
+            print(f"  geometry {t['geometry'] * 1e3:4.0f} + assemble {t['assemble'] * 1e3:4.0f} + incident "
+                  f"{t['incident'] * 1e3:3.0f} + solve {t['solve'] * 1e3:4.0f} ({t['iterations']:2d} it) + aperture "
+                  f"integrals {(t['direct'] + t['scattered']) * 1e3:4.0f} = {total * 1e3:5.0f} ms", flush=True)
             return row
 
         frame(np.zeros(3), False)  # compiles the kernels
         session._previous.clear()
-        print(f"real-time frames, lambda/{per} ({len(faces)} elements), GMRES rtol 1e-3:")
+        print(f"real-time frames, lambda/{per} ({len(faces)} elements), FocusSession defaults:")
         print(" cold frame:")
         fast = frame(np.zeros(3), False)
         print(" hand moves (2, 1, 1) mm per frame, focus fixed (rigid motion, warm start):")
         for step in range(1, 6):
             frame(np.array([0.002, 0.001, 0.001]) * step, True)
-        print(f"  rtol 1e-3 vs 1e-6 phases: max difference "
-              f"{np.degrees(np.abs(np.angle(fast / rows[per]))).max():.3f} deg", flush=True)
+        print(f"  real-time vs tight solve: focus with its phases {efficiency(rows[per], -np.angle(fast)):.5%}, "
+              f"max phase difference {np.degrees(np.abs(np.angle(fast / rows[per]))).max():.2f} deg", flush=True)
         del session
         cp.get_default_memory_pool().free_all_blocks()
 
