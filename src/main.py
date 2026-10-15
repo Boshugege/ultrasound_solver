@@ -200,9 +200,12 @@ def execute(cfg):
         )
     if cfg.mode == "phase_optimization":
         validate_algorithm(cfg)
-    from algorithm.solvers import HelmholtzDirectSolver
+    if str(cfg.solver.get("backend", "")).lower() == "bem":
+        from algorithm.bem.scene_solver import BemSceneSolver as Solver
+    else:
+        from algorithm.solvers import HelmholtzDirectSolver as Solver
 
-    solver = HelmholtzDirectSolver(cfg)
+    solver = Solver(cfg)
     basis = None
     started = time.perf_counter()
     try:
