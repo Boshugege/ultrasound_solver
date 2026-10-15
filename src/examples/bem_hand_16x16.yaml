@@ -1,0 +1,60 @@
+# 有障碍物的实时聚焦示例：17 cm 成年手平放在 SonicSurface 16x16 阵列上方，
+# 最低点距阵面约 9 cm，焦点在掌心下方 1 cm。
+# solver.backend: bem —— 刚性障碍物边界元；声源与 PDE 相同（sinc Neumann 孔径），
+# 开放面是真实自由空间（不需要 PML）。网格只用于采样声场（损失、可视化），
+# 不影响边界元精度；同一场景的 cudss_hybrid_direct 在 24 GB GPU 上无法分解。
+mode: phase_optimization
+algorithm: adjoint
+algorithm_options:
+  optimizer: lbfgsb
+physics:
+  sound_speed: 346.0
+  medium_density: 1.21
+transducer_specs:
+  frequency: 40000.0
+  array_n: 16
+  diameter: 0.009
+  pitch: 0.0105
+  geometry: sonicsurface_reference
+  reference_anchor_m: [0.08, 0.08]
+domain:
+  origin_m: [-0.04, -0.04, 0.0]
+  box_size: [0.24, 0.24, 0.16]
+  grid_size: [73, 73, 49]
+boundary_conditions:
+  "-x": open
+  "+x": open
+  "-y": open
+  "+y": open
+  "-z": reflecting
+  "+z": open
+targets:
+  - point: [0.08, 0.082, 0.08]
+obstacles:
+  - type: mesh
+    file: ../../obstacle_displacement_study/models/hand_watertight.vtk
+    center_m: [0.08, 0.082, 0.1165]
+    rotation_deg: [0.0, 90.0, 90.0]
+    scale: 0.6145
+    material:
+      density: 1100.0
+      sound_speed: 1550.0
+solver:
+  backend: bem
+  bem_elements_per_wavelength: 5   # 表面单元边长 = 波长 / 5（焦点效率 99.98%，见 bem_study）
+  bem_rtol: 1.0e-5                 # 每次 GMRES 的相对残差
+training:
+  loss_type: focal_pressure
+  initial_phase: response
+  seed: 7
+  background_weight: 0.0
+  phase_basis_file: outputs/bem_hand_16x16/phase_response_basis.npy
+  phase_basis_batch_size: 16
+  load_basis_to_gpu: true
+  show_loss_curve: false
+  iterations: 300
+  max_evaluations: 600
+  source_exclusion_layers: 4
+io:
+  output_file: outputs/bem_hand_16x16/result.npz
+  auto_visualize: false
