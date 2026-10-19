@@ -1,0 +1,59 @@
+mode: phase_optimization
+algorithm: response_alignment
+physics:
+  sound_speed: 346.0
+  medium_density: 1.21
+transducer_specs:
+  frequency: 40000.0
+  array_n: 2
+  diameter: 0.009
+  pitch: 0.0105
+  geometry: ideal_grid
+  source_radial_order: 12
+  source_angular_order: 48
+domain:
+  box_size: [0.06, 0.06, 0.06]
+  grid_size: [31, 31, 31]
+boundary_conditions:
+  "-x": open
+  "+x": open
+  "-y": open
+  "+y": open
+  "-z": reflecting
+  "+z": open
+targets:
+  - point: [0.03, 0.03, 0.045]
+obstacles:
+  - type: mesh
+    file: ../assets/triangle_plate.vtk
+    center_m: [0.03, 0.03, 0.03]
+    rotation_deg: [0.0, 0.0, 0.0]
+    scale: 1.0
+    neural_chief_points_m:
+      - [0.03, 0.03, 0.03]
+    material:
+      density: 1250.0
+      sound_speed: 2200.0
+solver:
+  backend: neural_bem
+  bem_elements_per_wavelength: 4
+  bem_rtol: 1.0e-5
+  neural_elements_per_wavelength: 3
+  neural_residual_tolerance: 0.02
+  neural_max_panels: 2200
+  neural_device: cuda
+training:
+  loss_type: focal_pressure
+  initial_phase: response
+  seed: 7
+  background_weight: 0.0
+  phase_basis_file: outputs/neural_bem_triangle_2x2/basis.npy
+  phase_basis_batch_size: 4
+  load_basis_to_gpu: true
+  show_loss_curve: false
+  iterations: 1
+  max_evaluations: 1
+  source_exclusion_layers: 2
+io:
+  output_file: outputs/neural_bem_triangle_2x2/result.npz
+  auto_visualize: false

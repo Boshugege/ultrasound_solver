@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 import time
 
 import numpy as np
@@ -40,6 +41,9 @@ def scene_metadata(cfg, solver):
         ]
         grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
         output["sdf"] = np.linalg.norm(grid - obs["center"], axis=-1) - obs["radius"]
+    if hasattr(solver, "last_neural_stats"):
+        output["neural_backend_stats"] = json.dumps(
+            solver.last_neural_stats, allow_nan=False)
     return output
 
 
@@ -200,8 +204,14 @@ def execute(cfg):
         )
     if cfg.mode == "phase_optimization":
         validate_algorithm(cfg)
-    if str(cfg.solver.get("backend", "")).lower() == "bem":
+    backend = str(cfg.solver.get("backend", "")).lower()
+    if backend == "bem":
         from algorithm.bem.scene_solver import BemSceneSolver as Solver
+    elif backend == "neural_bem":
+        repository_root = str(Path(__file__).resolve().parents[1])
+        if repository_root not in sys.path:
+            sys.path.insert(0, repository_root)
+        from nerual.backend import NeuralBemSceneSolver as Solver
     else:
         from algorithm.solvers import HelmholtzDirectSolver as Solver
 
