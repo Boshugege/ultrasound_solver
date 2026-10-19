@@ -31,7 +31,6 @@ MIN_DUTY_CYCLE = 0.05
 MAX_DUTY_CYCLE = 0.95
 MAX_DURATION_S = 3600.0
 SERIAL_WRITE_TIMEOUT_S = 3.0
-SERIAL_REOPEN_SETTLE_S = 2.0
 
 
 def triangle_sweep_frequency(
@@ -141,7 +140,7 @@ class SonicSurfaceController:
         self._serial = self._open_serial()
         # Arduino-class USB serial bridges commonly reset when the port opens.
         # Wait for the bootloader/application before resending the full frame.
-        time.sleep(SERIAL_REOPEN_SETTLE_S)
+        time.sleep(self.config.reopen_settle_s)
         self._serial_recoveries += 1
 
     def _send_bytes(self, data: bytes) -> bool:

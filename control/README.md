@@ -633,6 +633,9 @@ python control\client.py off
 自动关闭并重开串口，再完整重发一次；该帧头会重置 FPGA 字节计数器，因此
 不会把半帧继续当作相位。单字节双缓冲交换命令不会盲目重试，以免不确定地
 交换两次。状态接口中的 `serial_recoveries` 和 `last_serial_error` 可用于诊断。
+重开串口后等待 `serial.reopen_settle_s` 秒（默认 `2`）：经 Arduino 转发时，
+打开串口会让 Arduino 复位并在 bootloader 中停留约 2 秒；直接使用 USB 转 TTL
+适配器时不会复位，可改为 `0.2`。
 
 移动轨迹默认使用 `/v1/pattern` 直接覆盖相位。不要在每个轨迹点重新启动
 `/v1/modulation`；这会反复发送关闭缓冲区并增加串口超时和运动卡顿风险。

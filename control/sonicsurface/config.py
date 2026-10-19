@@ -26,6 +26,9 @@ class SonicSurfaceConfig:
     calibration_mode: str
     phase_corrections_bins: np.ndarray
     calibration_verified: bool
+    # Wait after reopening the port: an Arduino bridge resets on open (~2 s),
+    # a plain USB-TTL adapter does not.
+    reopen_settle_s: float = 2.0
 
 
 def _load_channel_order(raw: object) -> tuple[str, np.ndarray]:
@@ -62,6 +65,9 @@ def load_config(path: str | Path) -> SonicSurfaceConfig:
     if baudrate <= 0:
         raise ValueError("serial.baudrate 必须为正数")
     serial_port = serial.get("port")
+    reopen_settle_s = float(serial.get("reopen_settle_s", 2.0))
+    if not np.isfinite(reopen_settle_s) or reopen_settle_s < 0:
+        raise ValueError("serial.reopen_settle_s 必须是非负数")
 
     order_name, order = _load_channel_order(raw.get("channel_order", "sonicsurface"))
     mode = str(calibration.get("mode", "firmware")).lower()
@@ -84,4 +90,5 @@ def load_config(path: str | Path) -> SonicSurfaceConfig:
         calibration_mode=mode,
         phase_corrections_bins=corrections,
         calibration_verified=bool(calibration.get("verified", False)),
+        reopen_settle_s=reopen_settle_s,
     )
