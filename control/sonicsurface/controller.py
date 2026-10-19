@@ -30,6 +30,11 @@ MAX_MODULATION_HZ = 500.0
 MIN_DUTY_CYCLE = 0.05
 MAX_DUTY_CYCLE = 0.95
 MAX_DURATION_S = 3600.0
+# Envelope timing: Event.wait() until COARSE_WAIT_S before a deadline (it wakes
+# at once on stop but overshoots by up to ~16 ms on Windows), time.sleep() until
+# SPIN_WINDOW_S before it, then yield in a loop.
+COARSE_WAIT_S = 0.025
+SPIN_WINDOW_S = 0.001
 SERIAL_WRITE_TIMEOUT_S = 3.0
 SERIAL_REOPEN_SETTLE_S = 2.0
 
@@ -394,11 +399,12 @@ class SonicSurfaceController:
         sweep_period_s: float | None,
     ) -> None:
         started = time.perf_counter()
+        next_on = started
         cycles = 0
         error: str | None = None
         try:
-            while not self._modulation_stop.is_set():
-                elapsed = time.perf_counter() - started
+            while True:
+                elapsed = next_on - started
                 if duration_s is not None and elapsed >= duration_s:
                     break
                 current_frequency_hz = frequency_hz
@@ -414,20 +420,23 @@ class SonicSurfaceController:
                         sweep_period_s,
                     )
                 period_s = 1.0 / current_frequency_hz
-                on_s = period_s * duty_cycle
                 with self._state_lock:
                     self._modulation["current_frequency_hz"] = current_frequency_hz
-                cycle_started = time.perf_counter()
+                if self._sleep_until(next_on):
+                    break
                 self._send_bytes(compile_swap())
-                if self._modulation_stop.wait(on_s):
+                if self._sleep_until(next_on + period_s * duty_cycle):
                     break
                 self._send_bytes(compile_swap())
                 cycles += 1
                 with self._state_lock:
                     self._modulation["cycles"] = cycles
-                remaining = period_s - (time.perf_counter() - cycle_started)
-                if remaining > 0.0:
-                    self._modulation_stop.wait(remaining)
+                next_on += period_s
+                # After a stall (e.g. a serial retry) restart the schedule
+                # instead of firing the missed cycles back to back.
+                now = time.perf_counter()
+                if now - next_on > period_s:
+                    next_on = now
         except (IOError, OSError) as exc:
             error = str(exc)
             LOGGER.exception("波群调制串口发送失败")
@@ -441,6 +450,26 @@ class SonicSurfaceController:
                 self._modulation["running"] = False
                 self._modulation["cycles"] = cycles
                 self._modulation["last_error"] = error
+
+    def _sleep_until(self, deadline: float) -> bool:
+        """Wait until ``deadline`` (perf_counter); True if modulation must stop.
+
+        Event.wait() has ~15 ms granularity on Windows, which turned a 200 Hz
+        envelope into ~65 Hz. time.sleep() is high resolution on Windows since
+        Python 3.11; the last millisecond yields in a loop.
+        """
+        stop = self._modulation_stop
+        while not stop.is_set():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0.0:
+                return False
+            if remaining > COARSE_WAIT_S:
+                stop.wait(remaining - COARSE_WAIT_S)
+            elif remaining > SPIN_WINDOW_S:
+                time.sleep(remaining - SPIN_WINDOW_S)
+            else:
+                time.sleep(0.0)
+        return True
 
     def _stop_modulation(self) -> None:
         thread = self._modulation_thread
