@@ -621,8 +621,25 @@ python control\server.py `
   --live
 ```
 
-服务端日志会记录每次相位提交的来源、是否真实发送和帧 SHA-256。停止实验前
-先执行：
+`/v1/pattern` 默认不等待串口：服务端把帧交给后台写线程后立即返回，写线程在
+串口空闲时总是发送最新的一帧。`230400 baud` 下一帧需要 `11.2 ms`，上限约
+`89 帧/秒`；客户端发送得更快时，尚未写出的旧帧会被新帧替换，不会排队，
+因此发出的永远是最新相位。响应中的 `transmitted: true` 表示已交给真实串口
+（dry-run 为 `false`），`queued: true` 表示走的是这条异步路径；需要等帧写完
+再返回时，在请求体中加 `"wait": true`。`/v1/off` 和 `/v1/modulation` 始终同步
+写出，并先丢弃尚未写出的帧，因此关闭命令不会被之前的相位覆盖。
+
+客户端（`sonicsurface.client.request_json`，各 demo 脚本都经由它）连接本机服务时
+先不带超时建立连接，连上后再设置收发超时：Windows 上带超时的 `connect()` 即使
+连 `127.0.0.1` 也常多等约 16 ms，原先每帧新建这样的连接，加上同步等待串口写完，
+模拟测试中只能跑到约 42 帧/秒。服务端同时打开了 `TCP_NODELAY`。
+
+`/v1/status` 的 `stream` 字段给出写线程统计：`frames_queued`、`frames_written`、
+`frames_superseded`（被新帧替换或被关闭丢弃的帧）、`write_errors`、
+`last_write_ms`/`max_write_ms`（单帧写串口耗时）、`last_latency_ms`（从提交到
+写完）以及 `pending`。逐帧日志在流式发送时会刷屏，因此改为 DEBUG 级别，需要时
+用 `--log-level DEBUG` 打开，日志会记录每次相位提交的来源、是否真实发送和帧
+SHA-256。停止实验前先执行：
 
 ```powershell
 python control\client.py off
@@ -672,11 +689,13 @@ POST /v1/off
 ```json
 {
   "phases_rad": [0.0, 0.1, 0.2],
-  "source": "outputs/example/adjoint/result_best_phases_rad.npy"
+  "source": "outputs/example/adjoint/result_best_phases_rad.npy",
+  "wait": false
 }
 ```
 
-实际数组必须包含 256 项。数值表示弧度；`null` 可用于关闭单个通道。
+实际数组必须包含 256 项。数值表示弧度；`null` 可用于关闭单个通道。`wait`
+可省略，默认 `false`（见第 5 节）。
 
 `/v1/modulation` 在相同相位数组之外接受：
 

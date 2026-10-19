@@ -49,6 +49,10 @@ def create_server(
     port: int = 8765,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
+        # Headers and body go out in two writes; without TCP_NODELAY the second
+        # can wait for the client's delayed ACK.
+        disable_nagle_algorithm = True
+
         def log_message(self, *_: object) -> None:
             return
 
@@ -80,8 +84,11 @@ def create_server(
                     result = controller.submit(
                         _parse_phases(payload.get("phases_rad")),
                         source=source,
+                        wait=bool(payload.get("wait", False)),
                     )
-                    LOGGER.info(
+                    # Per-frame lines would flood the console when streaming;
+                    # /v1/status carries the counters.
+                    LOGGER.debug(
                         "相位已接收 source=%s transmitted=%s sha256=%s",
                         source,
                         result["transmitted"],
@@ -181,9 +188,15 @@ def main() -> None:
         action="store_true",
         help="真实打开串口；缺省为 dry-run，不访问硬件",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING"),
+        help="DEBUG 会逐帧记录相位提交",
+    )
     args = parser.parse_args()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(message)s",
     )
     serve(args.config, host=args.host, port=args.port, live=args.live)
