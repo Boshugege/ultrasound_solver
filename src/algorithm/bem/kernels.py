@@ -11,7 +11,9 @@ and the element (in units of the element's longest edge):
                 each with the 7-point rule
 
 Device arithmetic is single precision (FP64 sin/cos made assembly ~10x slower and
-the sphere validation shows no accuracy change); the singular self terms are
+the sphere validation shows no accuracy change). Float kernels keep their literals
+as float (``1.0f``): a double literal promotes the expression to FP64, which runs
+at 1/64 rate on GeForce GPUs. The singular self terms are
 computed in double precision separately (``bem.solver``):
 the double-layer self term vanishes on a flat element and the hypersingular self
 term is a Hadamard finite part.
@@ -22,6 +24,7 @@ import cupy as cp
 _SOURCE = r"""
 #include <cupy/complex.cuh>
 #define PI 3.14159265358979323846
+#define PI_F 3.14159265f
 
 __device__ const float QB[7][3] = {
     {1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0},
@@ -42,7 +45,7 @@ __device__ void point_kernel(const float* x, const float* nx, const float* y,
     float rx = y[0] - x[0], ry = y[1] - x[1], rz = y[2] - x[2];
     float r = sqrtf(rx * rx + ry * ry + rz * rz);
     float kr = k * r, c = cosf(kr), s = sinf(kr);
-    float scale = 1.0 / (4.0 * PI * r * r);
+    float scale = 1.0f / (4.0f * PI_F * r * r);
     float gp_r = (-c - s * kr) * scale, gp_i = (c * kr - s) * scale;  // G'
     float dny = (rx * ny[0] + ry * ny[1] + rz * ny[2]) / r;
     acc[0] += w * gp_r * dny;
@@ -50,9 +53,9 @@ __device__ void point_kernel(const float* x, const float* nx, const float* y,
     if (need_h) {
         float dnx = -(rx * nx[0] + ry * nx[1] + rz * nx[2]) / r;
         float nn = nx[0] * ny[0] + nx[1] * ny[1] + nx[2] * ny[2];
-        float a = 2.0 - kr * kr;
-        float gpp_r = (c * a + 2.0 * s * kr) * scale / r;  // G''
-        float gpp_i = (s * a - 2.0 * c * kr) * scale / r;
+        float a = 2.0f - kr * kr;
+        float gpp_r = (c * a + 2.0f * s * kr) * scale / r;  // G''
+        float gpp_i = (s * a - 2.0f * c * kr) * scale / r;
         float t1 = dnx * dny, t2 = (-nn - dnx * dny) / r;
         acc[2] += w * (gpp_r * t1 + gp_r * t2);
         acc[3] += w * (gpp_i * t1 + gp_i * t2);
@@ -78,13 +81,13 @@ __device__ void element(const float* x, const float* nx, const float* v,
                         float hsize, float k, int need_h, float* acc) {
     float dx = centroid[0] - x[0], dy = centroid[1] - x[1], dz = centroid[2] - x[2];
     float d = sqrtf(dx * dx + dy * dy + dz * dz) / hsize;
-    if (d >= 4.0) {
+    if (d >= 4.0f) {
         point_kernel(x, nx, centroid, ny, k, area, need_h, acc);
         return;
     }
-    int m = d >= 2.0 ? 0 : d >= 1.0 ? 1 : d >= 0.5 ? 2 : 3;
+    int m = d >= 2.0f ? 0 : d >= 1.0f ? 1 : d >= 0.5f ? 2 : 3;
     int s = 1 << m;
-    float weight = area / (s * s), inv = 1.0 / s;
+    float weight = area / (s * s), inv = 1.0f / s;
     for (int a = 0; a < s; ++a) {
         for (int b = 0; b < s - a; ++b) {
             float p[2] = {a * inv, b * inv}, q[2] = {(a + 1) * inv, b * inv};
