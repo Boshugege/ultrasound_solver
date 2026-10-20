@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -22,25 +22,43 @@ def request_json(
     payload: dict[str, Any] | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
+    """One JSON request to the service.
+
+    On Windows, connect() with a timeout often waits ~16 ms even on 127.0.0.1;
+    with one connection per frame that capped streaming at ~70 frames/s. A local
+    service is therefore connected without a timeout, which is applied only to
+    the request and response.
+    """
     data = (
         None
         if payload is None
         else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     )
-    request = Request(
-        service_url.rstrip("/") + path,
-        data=data,
-        method=method,
-        headers={"Content-Type": "application/json"} if data is not None else {},
+    url = urlsplit(service_url)
+    if url.scheme != "http" or not url.hostname:
+        raise ValueError(f"服务地址必须是 http://主机:端口，实际为 {service_url!r}")
+    local = url.hostname in {"127.0.0.1", "localhost", "::1"}
+    connection = http.client.HTTPConnection(
+        url.hostname, url.port or 80, timeout=None if local else timeout
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"服务返回 HTTP {exc.code}：{detail}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"无法连接 SonicSurface 服务：{exc.reason}") from exc
+        connection.connect()
+        connection.sock.settimeout(timeout)
+        connection.request(
+            method,
+            url.path.rstrip("/") + path,
+            body=data,
+            headers={"Content-Type": "application/json"} if data is not None else {},
+        )
+        response = connection.getresponse()
+        text = response.read().decode("utf-8", errors="replace")
+    except (OSError, http.client.HTTPException) as exc:
+        raise RuntimeError(f"无法连接 SonicSurface 服务：{exc}") from exc
+    finally:
+        connection.close()
+    if response.status >= 400:
+        raise RuntimeError(f"服务返回 HTTP {response.status}：{text}")
+    return json.loads(text)
 
 
 def _build_parser() -> argparse.ArgumentParser:
