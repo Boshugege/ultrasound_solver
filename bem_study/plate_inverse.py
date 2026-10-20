@@ -31,6 +31,7 @@ from algorithm.bem.solver import RigidBEM, aperture_sources  # noqa: E402
 from nerual.amplitude_inverse import (  # noqa: E402
     DIAMETER, SCALE, Prism, PrismInverse, array_centers, compare, focus_patterns,
     observation_points, wavenumber)
+from nerual.inverse_start import scan_candidates  # noqa: E402
 
 SCENES = {
     "flat": Prism.from_euler((25, 23, 23.5), (0, 0, 0), 18, 3),
@@ -196,23 +197,6 @@ def starts(args):
                   f"(median centre error of those {np.median(centre[ok]) if len(ok) else np.nan:.3f} mm); "
                   f"best-of-K by loss succeeds with K=1/3/10: {best[0]:.0%}/{best[1]:.0%}/{best[2]:.0%}; "
                   f"median {np.median(seconds):.1f} s per start")
-
-
-def scan_candidates(model, keep, side=17e-3, thickness=3.5e-3):
-    """Lowest-loss prisms on a grid of centres (1.5 mm) and in-plane turns (30 deg),
-    flat and of a nominal size that is not the true one."""
-    xs, zs = np.arange(18, 30.01, 1.5) * 1e-3, np.arange(16, 30.01, 1.5) * 1e-3
-    found = []
-    with torch.no_grad():
-        for angle in (0, 30, 60, 90):
-            for x in xs:
-                for y in xs:
-                    for z in zs:
-                        prism = Prism((x, y, z), (0.0, 0.0, np.radians(angle)), side, thickness)
-                        params = torch.as_tensor(prism.params(), dtype=torch.float64, device="cuda")
-                        found.append((float(model.loss(params)), prism))
-    found.sort(key=lambda item: item[0])
-    return [prism for _, prism in found[:keep]], len(found)
 
 
 def scan(args):
