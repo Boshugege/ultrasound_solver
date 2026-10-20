@@ -571,7 +571,11 @@ dry-run 返回 `"accepted": true` 和 `"transmitted": false`，说明数据已�
 - `--duty`：`0.05..0.95`，默认 `0.5`。
 - `--duration`：可选，单位秒；省略表示持续运行。
 
-Windows 上的软件定时不是硬实时。需要严格稳定的高频包络时，应改用
+交换命令按绝对时间表发送：远离截止时刻时用 `Event.wait`，最后 25 ms 改用
+`time.sleep`，最后 1 ms 循环让出 CPU。`Event.wait` 在 Windows 上只有约 15 ms
+的精度，原先全程用它计时，请求 200 Hz 时实际只有约 65 Hz、占空比也失真；
+`time.sleep` 自 Python 3.11 起在 Windows 上是高精度定时器，因此需要 Python 3.11
+及以上。USB 串口本身仍有约 1 ms 的发送抖动。需要严格稳定的高频包络时，应改用
 `FPGATactileModulation.jic` 及其 FPGA 内部调制命令，但该固件的相位校准值
 必须针对当前阵列重新确认。
 
