@@ -25,7 +25,8 @@ from algorithm.solvers.iterative_solver import GpuIterativeSolver
 class HelmholtzDirectSolver:
     """Assemble and solve the discrete Helmholtz system."""
 
-    MODEL_VERSION = "helmholtz_conservative_sources_v4"
+    # v5: obstacle materials blend 1/rho and 1/(rho c^2) across the SDF interface.
+    MODEL_VERSION = "helmholtz_conservative_sources_v5"
     field_unit = "Pa"
 
     def __init__(self, config: SimulationConfig):

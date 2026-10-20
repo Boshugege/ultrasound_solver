@@ -111,11 +111,17 @@ class SceneSolverTests(unittest.TestCase):
         reference = basis.basis[np.ravel_multi_index(index, (26, 26, 26), order="F")]
         self.assertLess(np.abs(row - reference).max() / np.abs(reference).max(), 5e-3)
 
-        session = FocusSession(solver.transducers.centers, cfg.specs.diameter, k=cfg.k0,
-                               planes=solver.planes, rtol=1e-6)
-        session.set_surface(solver.bem.geo["triangles"].get().reshape(-1, 3),
-                            np.arange(3 * solver.bem.n).reshape(-1, 3))
-        np.testing.assert_allclose(session.response_row(point), row, rtol=0, atol=1e-5 * np.abs(row).max())
+        surface = (solver.bem.geo["triangles"].get().reshape(-1, 3), np.arange(3 * solver.bem.n).reshape(-1, 3))
+        exact = FocusSession(solver.transducers.centers, cfg.specs.diameter, k=cfg.k0, planes=solver.planes,
+                             rtol=1e-6, scattered_orders=(8, 32), block_size=None, half_precision=False)
+        exact.set_surface(*surface)
+        np.testing.assert_allclose(exact.response_row(point), row, rtol=0, atol=1e-5 * np.abs(row).max())
+
+        # Real-time defaults (rtol 1e-2, coarse quadrature, block-Jacobi, float16 matrix).
+        fast = FocusSession(solver.transducers.centers, cfg.specs.diameter, k=cfg.k0, planes=solver.planes)
+        fast.set_surface(*surface)
+        quick = fast.response_row(point)
+        self.assertGreater(abs(np.sum(row * np.exp(-1j * np.angle(quick)))) / np.abs(row).sum(), 0.9999)
         basis.close()
 
     def test_unsupported_scenes_raise(self):

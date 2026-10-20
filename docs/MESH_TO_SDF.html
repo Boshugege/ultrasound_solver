@@ -196,6 +196,16 @@ WarpAssemblyEngine.assemble_system_gpu()
 
   <p>当 <code>smoothing_width_cells &gt; 0</code> 时，界面附近会有平滑过渡层；当设为 <code>0</code> 时，使用硬阈值界面。</p>
 
+  <p>过渡层中线性混合的是方程里实际出现的两个系数：通量系数 <code>1/rho</code> 与质量项系数 <code>1/(rho c^2)</code>，
+  再由它们得到 <code>rho</code> 和 <code>c</code>（<code>blend_obstacle_material</code>）：</p>
+
+  <pre><code>1/rho        = 1/rho_obs + (1/rho_0 - 1/rho_obs) * H
+1/(rho c^2)  = 1/(rho_obs c_obs^2) + (1/(rho_0 c_0^2) - 1/(rho_obs c_obs^2)) * H</code></pre>
+
+  <p>这样过渡层的中点落在 SDF 零面上。若直接线性混合 <code>rho</code>，致密障碍物（如 rho=1250，空气的上千倍）在零面外侧
+  不远处就已在声学上近似刚性，散射等效于一个约大 1 个网格的物体，散射场只按一阶收敛；
+  对比与修正前后的数据见 <code>docs/BEM_REALTIME_FOCUSING.md</code>。</p>
+
   <h2>mesh 质量要求</h2>
 
   <p>输入 mesh 必须满足：</p>

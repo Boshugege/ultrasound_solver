@@ -21,6 +21,7 @@ import cupy as cp
 
 _SOURCE = r"""
 #include <cupy/complex.cuh>
+#include <cuda_fp16.h>
 #define PI 3.14159265358979323846
 
 __device__ const float QB[7][3] = {
@@ -41,7 +42,10 @@ __device__ void point_kernel(const float* x, const float* nx, const float* y,
                              float* acc) {
     float rx = y[0] - x[0], ry = y[1] - x[1], rz = y[2] - x[2];
     float r = sqrtf(rx * rx + ry * ry + rz * rz);
-    float kr = k * r, c = cosf(kr), s = sinf(kr);
+    float kr = k * r, c, s;
+    // kr is only known to float precision anyway; reduce to [-pi, pi] and use the
+    // hardware sin/cos (as accurate as sinf/cosf here, several times faster).
+    __sincosf(kr - 6.28318530718f * rintf(kr * 0.159154943092f), &s, &c);
     float scale = 1.0 / (4.0 * PI * r * r);
     float gp_r = (-c - s * kr) * scale, gp_i = (c * kr - s) * scale;  // G'
     float dny = (rx * ny[0] + ry * ny[1] + rz * ny[2]) / r;
@@ -107,14 +111,15 @@ __device__ void load(const float* verts, const float* cent, const float* nrm, in
     }
 }
 
-// A_ij = [i == j and image 0 included] / 2 - K_ij - alpha H_ij over images [first, last)
-// (row i: collocation point, column j: element)
+// A_ij = base_ij + [i == j and image 0 included] / 2 - K_ij - alpha H_ij over images
+// [first, last) (row i: collocation point, column j: element; base may be null)
 extern "C" __global__ void assemble(
     const int n, const float* cent, const float* nrm, const float* verts,
     const float* area, const float* hsize, const float* hself_re,
     const float* hself_im, const float k, const float alpha_re,
     const float alpha_im, const float* signs, const float* offsets,
-    const int first, const int last, complex<float>* A) {
+    const int first, const int last, const complex<float>* base, complex<float>* A,
+    __half* half_re, __half* half_im, const float half_scale) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int i = blockIdx.y;
     if (j >= n) return;
@@ -134,7 +139,38 @@ extern "C" __global__ void assemble(
     float re = -acc[0] - (alpha_re * acc[2] - alpha_im * acc[3]);
     float im = -acc[1] - (alpha_re * acc[3] + alpha_im * acc[2]);
     if (i == j && first == 0) re += 0.5f;
-    A[(size_t)i * n + j] = complex<float>(re, im);
+    complex<float> value(re, im);
+    size_t index = (size_t)i * n + j;
+    if (base != nullptr) value += base[index];
+    if (half_re != nullptr) {  // scaled float16 copy only (real-time GMRES)
+        half_re[index] = __float2half(value.real() * half_scale);
+        half_im[index] = __float2half(value.imag() * half_scale);
+    } else {
+        A[index] = value;
+    }
+}
+
+// value_p = sum_s w_s G(x_p, y_s), grad_p = its gradient in x_p (double precision)
+extern "C" __global__ void monopoles(
+    const int npts, const double* pts, const int nsrc, const double* src,
+    const complex<double>* w, const double k, complex<double>* value, complex<double>* grad) {
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= npts) return;
+    complex<double> v(0.0, 0.0), g[3] = {complex<double>(0.0, 0.0), complex<double>(0.0, 0.0),
+                                         complex<double>(0.0, 0.0)};
+    for (int q = 0; q < nsrc; ++q) {
+        double d[3] = {pts[3 * p] - src[3 * q], pts[3 * p + 1] - src[3 * q + 1],
+                       pts[3 * p + 2] - src[3 * q + 2]};
+        double r = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        double sn, cs;
+        sincos(k * r, &sn, &cs);
+        complex<double> green = complex<double>(cs, sn) * w[q] / (4.0 * PI * r);
+        complex<double> radial = green * complex<double>(-1.0 / r, k) / r;  // dG/dr / r
+        v += green;
+        for (int a = 0; a < 3; ++a) g[a] += radial * d[a];
+    }
+    value[p] = v;
+    for (int a = 0; a < 3; ++a) grad[3 * p + a] = g[a];
 }
 
 // D_pj = integral over element j of dG(x_p, y)/dn_y summed over all images
@@ -211,22 +247,49 @@ def _images(images):
             cp.ascontiguousarray(cp.asarray(offsets, dtype=cp.float32).ravel()), len(signs))
 
 
-def assemble(geometry, k, alpha, hself, images, first=0, last=None):
-    """Matrix over image indices [first, last); image 0 (the body itself) carries
-    the 1/2 identity and the singular self terms."""
+def assemble(geometry, k, alpha, hself, images, first=0, last=None, base=None, out=None,
+             half_scale=None):
+    """Matrix over image indices [first, last), added to ``base`` if given; image 0
+    (the body itself) carries the 1/2 identity and the singular self terms. ``out``
+    reuses existing output arrays. With ``half_scale`` the result is returned only as
+    float16 (real, imaginary) parts multiplied by ``half_scale``."""
     n = geometry["n"]
     signs, offsets, count = _images(images)
     last = count if last is None else last
-    A = cp.empty((n, n), dtype=cp.complex64)
+    if half_scale is None:
+        A = cp.empty((n, n), dtype=cp.complex64) if out is None else out
+        half = (cp.uint64(0), cp.uint64(0))
+    else:
+        A = None
+        half = out if out is not None else (cp.empty((n, n), dtype=cp.float16),
+                                            cp.empty((n, n), dtype=cp.float16))
     threads = 128
     module().get_function("assemble")(
         ((n + threads - 1) // threads, n), (threads,),
         (cp.int32(n), geometry["centroids"], geometry["normals"], geometry["vertices"],
          geometry["areas"], geometry["hsize"], cp.ascontiguousarray(hself.real.astype(cp.float32)),
          cp.ascontiguousarray(hself.imag.astype(cp.float32)), cp.float32(k), cp.float32(alpha.real),
-         cp.float32(alpha.imag), signs, offsets, cp.int32(first), cp.int32(last), A),
+         cp.float32(alpha.imag), signs, offsets, cp.int32(first), cp.int32(last),
+         base if base is not None else cp.uint64(0), A if A is not None else cp.uint64(0),
+         half[0], half[1], cp.float32(half_scale or 0.0)),
     )
-    return A
+    return A if half_scale is None else half
+
+
+def monopoles(points, sources, weights, k):
+    """Weighted monopoles: values (P,) and gradients (P, 3) at ``points`` (complex128)."""
+    points = cp.ascontiguousarray(cp.asarray(points, dtype=cp.float64))
+    sources = cp.ascontiguousarray(cp.asarray(sources, dtype=cp.float64))
+    weights = cp.ascontiguousarray(cp.asarray(weights, dtype=cp.complex128))
+    value = cp.empty(len(points), dtype=cp.complex128)
+    grad = cp.empty((len(points), 3), dtype=cp.complex128)
+    threads = 128
+    module().get_function("monopoles")(
+        ((len(points) + threads - 1) // threads,), (threads,),
+        (cp.int32(len(points)), points, cp.int32(len(sources)), sources, weights, cp.float64(k),
+         value, grad),
+    )
+    return value, grad
 
 
 def evaluation_matrix(geometry, points, k, images):
