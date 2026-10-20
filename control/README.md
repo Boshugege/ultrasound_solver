@@ -571,7 +571,11 @@ dry-run 返回 `"accepted": true` 和 `"transmitted": false`，说明数据已�
 - `--duty`：`0.05..0.95`，默认 `0.5`。
 - `--duration`：可选，单位秒；省略表示持续运行。
 
-Windows 上的软件定时不是硬实时。需要严格稳定的高频包络时，应改用
+交换命令按绝对时间表发送：远离截止时刻时用 `Event.wait`，最后 25 ms 改用
+`time.sleep`，最后 1 ms 循环让出 CPU。`Event.wait` 在 Windows 上只有约 15 ms
+的精度，原先全程用它计时，请求 200 Hz 时实际只有约 65 Hz、占空比也失真；
+`time.sleep` 自 Python 3.11 起在 Windows 上是高精度定时器，因此需要 Python 3.11
+及以上。USB 串口本身仍有约 1 ms 的发送抖动。需要严格稳定的高频包络时，应改用
 `FPGATactileModulation.jic` 及其 FPGA 内部调制命令，但该固件的相位校准值
 必须针对当前阵列重新确认。
 
@@ -621,8 +625,25 @@ python control\server.py `
   --live
 ```
 
-服务端日志会记录每次相位提交的来源、是否真实发送和帧 SHA-256。停止实验前
-先执行：
+`/v1/pattern` 默认不等待串口：服务端把帧交给后台写线程后立即返回，写线程在
+串口空闲时总是发送最新的一帧。`230400 baud` 下一帧需要 `11.2 ms`，上限约
+`89 帧/秒`；客户端发送得更快时，尚未写出的旧帧会被新帧替换，不会排队，
+因此发出的永远是最新相位。响应中的 `transmitted: true` 表示已交给真实串口
+（dry-run 为 `false`），`queued: true` 表示走的是这条异步路径；需要等帧写完
+再返回时，在请求体中加 `"wait": true`。`/v1/off` 和 `/v1/modulation` 始终同步
+写出，并先丢弃尚未写出的帧，因此关闭命令不会被之前的相位覆盖。
+
+客户端（`sonicsurface.client.request_json`，各 demo 脚本都经由它）连接本机服务时
+先不带超时建立连接，连上后再设置收发超时：Windows 上带超时的 `connect()` 即使
+连 `127.0.0.1` 也常多等约 16 ms，原先每帧新建这样的连接，加上同步等待串口写完，
+模拟测试中只能跑到约 42 帧/秒。服务端同时打开了 `TCP_NODELAY`。
+
+`/v1/status` 的 `stream` 字段给出写线程统计：`frames_queued`、`frames_written`、
+`frames_superseded`（被新帧替换或被关闭丢弃的帧）、`write_errors`、
+`last_write_ms`/`max_write_ms`（单帧写串口耗时）、`last_latency_ms`（从提交到
+写完）以及 `pending`。逐帧日志在流式发送时会刷屏，因此改为 DEBUG 级别，需要时
+用 `--log-level DEBUG` 打开，日志会记录每次相位提交的来源、是否真实发送和帧
+SHA-256。停止实验前先执行：
 
 ```powershell
 python control\client.py off
@@ -633,6 +654,9 @@ python control\client.py off
 自动关闭并重开串口，再完整重发一次；该帧头会重置 FPGA 字节计数器，因此
 不会把半帧继续当作相位。单字节双缓冲交换命令不会盲目重试，以免不确定地
 交换两次。状态接口中的 `serial_recoveries` 和 `last_serial_error` 可用于诊断。
+重开串口后等待 `serial.reopen_settle_s` 秒（默认 `2`）：经 Arduino 转发时，
+打开串口会让 Arduino 复位并在 bootloader 中停留约 2 秒；直接使用 USB 转 TTL
+适配器时不会复位，可改为 `0.2`。
 
 移动轨迹默认使用 `/v1/pattern` 直接覆盖相位。不要在每个轨迹点重新启动
 `/v1/modulation`；这会反复发送关闭缓冲区并增加串口超时和运动卡顿风险。
@@ -672,11 +696,13 @@ POST /v1/off
 ```json
 {
   "phases_rad": [0.0, 0.1, 0.2],
-  "source": "outputs/example/adjoint/result_best_phases_rad.npy"
+  "source": "outputs/example/adjoint/result_best_phases_rad.npy",
+  "wait": false
 }
 ```
 
-实际数组必须包含 256 项。数值表示弧度；`null` 可用于关闭单个通道。
+实际数组必须包含 256 项。数值表示弧度；`null` 可用于关闭单个通道。`wait`
+可省略，默认 `false`（见第 5 节）。
 
 `/v1/modulation` 在相同相位数组之外接受：
 

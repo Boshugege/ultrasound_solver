@@ -30,8 +30,12 @@ MAX_MODULATION_HZ = 500.0
 MIN_DUTY_CYCLE = 0.05
 MAX_DUTY_CYCLE = 0.95
 MAX_DURATION_S = 3600.0
+# Envelope timing: Event.wait() until COARSE_WAIT_S before a deadline (it wakes
+# at once on stop but overshoots by up to ~16 ms on Windows), time.sleep() until
+# SPIN_WINDOW_S before it, then yield in a loop.
+COARSE_WAIT_S = 0.025
+SPIN_WINDOW_S = 0.001
 SERIAL_WRITE_TIMEOUT_S = 3.0
-SERIAL_REOPEN_SETTLE_S = 2.0
 
 
 def triangle_sweep_frequency(
@@ -85,6 +89,21 @@ class SonicSurfaceController:
             "cycles": 0,
             "last_error": None,
         }
+        # Streamed patterns: one pending frame (latest-only) and a writer thread.
+        self._pending: tuple[bytes, float] | None = None
+        self._pending_ready = threading.Condition()
+        self._writer_closing = False
+        self._writer_thread: threading.Thread | None = None
+        self._stream: dict[str, Any] = {
+            "frames_queued": 0,
+            "frames_written": 0,
+            "frames_superseded": 0,
+            "write_errors": 0,
+            "last_write_ms": None,
+            "max_write_ms": None,
+            "last_latency_ms": None,
+            "last_error": None,
+        }
 
         if live:
             if self._serial_factory is None:
@@ -94,6 +113,12 @@ class SonicSurfaceController:
                     raise RuntimeError("缺少 pyserial，无法打开串口") from exc
                 self._serial_factory = serial.Serial
             self._serial = self._open_serial()
+            self._writer_thread = threading.Thread(
+                target=self._run_writer,
+                name="sonicsurface-writer",
+                daemon=True,
+            )
+            self._writer_thread.start()
 
     def _open_serial(self) -> Any:
         assert self._serial_factory is not None
@@ -107,6 +132,9 @@ class SonicSurfaceController:
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             modulation = dict(self._modulation)
+            stream = dict(self._stream)
+        with self._pending_ready:
+            stream["pending"] = self._pending is not None
         return {
             "service": "sonicsurface-control",
             "config": self.config.name,
@@ -123,6 +151,7 @@ class SonicSurfaceController:
             "last_serial_error": self._last_serial_error,
             "last_submission": self._last_submission,
             "modulation": modulation,
+            "stream": stream,
         }
 
     def _write_once_locked(self, data: bytes) -> None:
@@ -141,38 +170,97 @@ class SonicSurfaceController:
         self._serial = self._open_serial()
         # Arduino-class USB serial bridges commonly reset when the port opens.
         # Wait for the bootloader/application before resending the full frame.
-        time.sleep(SERIAL_REOPEN_SETTLE_S)
+        time.sleep(self.config.reopen_settle_s)
         self._serial_recoveries += 1
 
     def _send_bytes(self, data: bytes) -> bool:
         if not self.live:
             return False
         with self._serial_lock:
+            self._send_locked(data)
+        return True
+
+    def _send_locked(self, data: bytes) -> None:
+        try:
+            self._write_once_locked(data)
+            self._last_serial_error = None
+        except (IOError, OSError) as exc:
+            self._last_serial_error = str(exc)
+            is_complete_frame = (
+                len(data) >= CHANNELS + 2
+                and data[0] == START_PHASES
+            )
+            if not is_complete_frame:
+                raise
+            LOGGER.warning(
+                "完整相位帧写入失败，重开串口后重发一次：%s",
+                exc,
+            )
+            self._reopen_serial_locked()
             try:
+                # 0xFE resets the FPGA byte counter, so resending a
+                # complete frame safely replaces any partial frame.
                 self._write_once_locked(data)
                 self._last_serial_error = None
-            except (IOError, OSError) as exc:
-                self._last_serial_error = str(exc)
-                is_complete_frame = (
-                    len(data) >= CHANNELS + 2
-                    and data[0] == START_PHASES
-                )
-                if not is_complete_frame:
-                    raise
-                LOGGER.warning(
-                    "完整相位帧写入失败，重开串口后重发一次：%s",
-                    exc,
-                )
-                self._reopen_serial_locked()
+            except (IOError, OSError) as retry_exc:
+                self._last_serial_error = str(retry_exc)
+                raise
+
+    def _run_writer(self) -> None:
+        """Send the newest queued pattern whenever the port is free.
+
+        A frame still waiting when a newer one arrives is dropped: the UART
+        carries at most ~89 frames/s and an old phase pattern has no value.
+        """
+        while True:
+            with self._pending_ready:
+                while self._pending is None and not self._writer_closing:
+                    self._pending_ready.wait()
+                if self._writer_closing:
+                    return
+            with self._serial_lock:
+                # Take the frame under the serial lock: off() and modulation
+                # discard pending frames first, so their writes stay after it.
+                with self._pending_ready:
+                    pending, self._pending = self._pending, None
+                if pending is None:
+                    continue
+                frame, queued_at = pending
+                started = time.perf_counter()
                 try:
-                    # 0xFE resets the FPGA byte counter, so resending a
-                    # complete frame safely replaces any partial frame.
-                    self._write_once_locked(data)
-                    self._last_serial_error = None
-                except (IOError, OSError) as retry_exc:
-                    self._last_serial_error = str(retry_exc)
-                    raise
-        return True
+                    self._send_locked(frame)
+                    error = None
+                except Exception as exc:  # keep the writer alive
+                    LOGGER.exception("相位帧写入串口失败")
+                    error = str(exc)
+                finished = time.perf_counter()
+            with self._state_lock:
+                stream = self._stream
+                stream["last_error"] = error
+                if error is not None:
+                    stream["write_errors"] += 1
+                    continue
+                write_ms = (finished - started) * 1e3
+                stream["frames_written"] += 1
+                stream["last_write_ms"] = write_ms
+                stream["max_write_ms"] = max(stream["max_write_ms"] or 0.0, write_ms)
+                stream["last_latency_ms"] = (finished - queued_at) * 1e3
+
+    def _queue_frame(self, frame: bytes) -> None:
+        with self._pending_ready:
+            superseded = self._pending is not None
+            self._pending = (frame, time.perf_counter())
+            self._pending_ready.notify()
+        with self._state_lock:
+            self._stream["frames_queued"] += 1
+            self._stream["frames_superseded"] += int(superseded)
+
+    def _discard_pending(self) -> None:
+        with self._pending_ready:
+            discarded, self._pending = self._pending is not None, None
+        if discarded:
+            with self._state_lock:
+                self._stream["frames_superseded"] += 1
 
     def _result(self, frame: bytes, transmitted: bool, source: str) -> dict[str, Any]:
         result = {
@@ -186,7 +274,19 @@ class SonicSurfaceController:
         self._last_submission = result
         return result
 
-    def submit(self, phases_rad: np.ndarray, source: str = "client") -> dict[str, Any]:
+    def submit(
+        self,
+        phases_rad: np.ndarray,
+        source: str = "client",
+        wait: bool = False,
+    ) -> dict[str, Any]:
+        """Send a phase pattern.
+
+        By default the frame is queued for the writer thread and the call returns
+        at once (``transmitted`` then means handed to the live serial link); a
+        newer pattern replaces a queued one that has not been written yet.
+        ``wait=True`` returns only after the frame has been written.
+        """
         self._stop_modulation()
         corrections = (
             self.config.phase_corrections_bins
@@ -198,10 +298,21 @@ class SonicSurfaceController:
             channel_order=self.config.channel_order,
             phase_corrections_bins=corrections,
         )
-        return self._result(frame, self._send_bytes(frame), source)
+        if not self.live or wait:
+            self._discard_pending()
+            transmitted = self._send_bytes(frame)
+            if transmitted:
+                with self._state_lock:
+                    self._stream["frames_written"] += 1
+            return self._result(frame, transmitted, source)
+        self._queue_frame(frame)
+        result = self._result(frame, True, source)
+        result["queued"] = True
+        return result
 
     def off(self, source: str = "client") -> dict[str, Any]:
         self._stop_modulation()
+        self._discard_pending()
         frame = compile_all_off()
         return self._result(frame, self._send_bytes(frame), source)
 
@@ -322,6 +433,7 @@ class SonicSurfaceController:
         off_frame = compile_all_off()
 
         self._stop_modulation()
+        self._discard_pending()
         pattern_sent = self._send_bytes(pattern_frame)
         off_sent = self._send_bytes(off_frame)
         transmitted = pattern_sent and off_sent
@@ -394,11 +506,12 @@ class SonicSurfaceController:
         sweep_period_s: float | None,
     ) -> None:
         started = time.perf_counter()
+        next_on = started
         cycles = 0
         error: str | None = None
         try:
-            while not self._modulation_stop.is_set():
-                elapsed = time.perf_counter() - started
+            while True:
+                elapsed = next_on - started
                 if duration_s is not None and elapsed >= duration_s:
                     break
                 current_frequency_hz = frequency_hz
@@ -414,20 +527,23 @@ class SonicSurfaceController:
                         sweep_period_s,
                     )
                 period_s = 1.0 / current_frequency_hz
-                on_s = period_s * duty_cycle
                 with self._state_lock:
                     self._modulation["current_frequency_hz"] = current_frequency_hz
-                cycle_started = time.perf_counter()
+                if self._sleep_until(next_on):
+                    break
                 self._send_bytes(compile_swap())
-                if self._modulation_stop.wait(on_s):
+                if self._sleep_until(next_on + period_s * duty_cycle):
                     break
                 self._send_bytes(compile_swap())
                 cycles += 1
                 with self._state_lock:
                     self._modulation["cycles"] = cycles
-                remaining = period_s - (time.perf_counter() - cycle_started)
-                if remaining > 0.0:
-                    self._modulation_stop.wait(remaining)
+                next_on += period_s
+                # After a stall (e.g. a serial retry) restart the schedule
+                # instead of firing the missed cycles back to back.
+                now = time.perf_counter()
+                if now - next_on > period_s:
+                    next_on = now
         except (IOError, OSError) as exc:
             error = str(exc)
             LOGGER.exception("波群调制串口发送失败")
@@ -441,6 +557,26 @@ class SonicSurfaceController:
                 self._modulation["running"] = False
                 self._modulation["cycles"] = cycles
                 self._modulation["last_error"] = error
+
+    def _sleep_until(self, deadline: float) -> bool:
+        """Wait until ``deadline`` (perf_counter); True if modulation must stop.
+
+        Event.wait() has ~15 ms granularity on Windows, which turned a 200 Hz
+        envelope into ~65 Hz. time.sleep() is high resolution on Windows since
+        Python 3.11; the last millisecond yields in a loop.
+        """
+        stop = self._modulation_stop
+        while not stop.is_set():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0.0:
+                return False
+            if remaining > COARSE_WAIT_S:
+                stop.wait(remaining - COARSE_WAIT_S)
+            elif remaining > SPIN_WINDOW_S:
+                time.sleep(remaining - SPIN_WINDOW_S)
+            else:
+                time.sleep(0.0)
+        return True
 
     def _stop_modulation(self) -> None:
         thread = self._modulation_thread
@@ -456,6 +592,12 @@ class SonicSurfaceController:
 
     def close(self) -> None:
         self._stop_modulation()
+        if self._writer_thread is not None:
+            with self._pending_ready:
+                self._writer_closing = True
+                self._pending_ready.notify()
+            self._writer_thread.join(timeout=5.0)
+            self._writer_thread = None
         if self._serial is not None:
             self._serial.close()
             self._serial = None

@@ -1,4 +1,10 @@
-"""Restarted GMRES for dense GPU (CuPy) or NumPy operators."""
+"""Restarted GMRES for dense GPU (CuPy) or NumPy operators.
+
+The Arnoldi process stays on the device: the Hessenberg matrix is copied to the
+host (one synchronisation) only every ``check_every`` steps to estimate the
+residual. Launch and synchronisation latency, not the matrix-vector product,
+otherwise dominates an iteration for matrices of ~10^4 unknowns.
+"""
 
 from dataclasses import dataclass
 
@@ -12,15 +18,15 @@ class KrylovResult:
     iterations: int
 
 
-def _givens(a: complex, b: complex):
-    """Complex rotation G with G @ [a, b] = [r, 0]."""
-    if a == 0:
-        return 0.0, 1.0 + 0j
-    norm = np.hypot(abs(a), abs(b))
-    return abs(a) / norm, (a / abs(a)) * np.conj(b) / norm
+def _least_squares(H, beta):
+    """min ||beta e1 - H y|| for a small (k + 1) x k Hessenberg matrix; returns y, residual."""
+    rhs = np.zeros(H.shape[0], dtype=complex)
+    rhs[0] = beta
+    y = np.linalg.lstsq(H, rhs, rcond=None)[0]
+    return y, float(np.linalg.norm(rhs - H @ y))
 
 
-def gmres(apply_a, b, x0=None, rtol=1e-5, restart=100, maxiter=500, xp=np):
+def gmres(apply_a, b, x0=None, rtol=1e-5, restart=100, maxiter=500, xp=np, check_every=1):
     """Solve ``A x = b`` to ``||b - A x|| <= rtol ||b||`` (true residual checked at
     every restart); ``iterations`` counts matrix-vector products in the Arnoldi loop."""
     b_norm = float(xp.linalg.norm(b))
@@ -35,13 +41,9 @@ def gmres(apply_a, b, x0=None, rtol=1e-5, restart=100, maxiter=500, xp=np):
             return KrylovResult(x, beta <= rtol * b_norm, total)
         m = min(restart, maxiter - total)
         V = xp.zeros((m + 1, b.size), dtype=b.dtype)
-        H = np.zeros((m + 1, m), dtype=complex)
-        cs = np.zeros(m)
-        sn = np.zeros(m, dtype=complex)
-        g = np.zeros(m + 1, dtype=complex)
-        g[0] = beta
+        H = xp.zeros((m + 1, m), dtype=complex)
         V[0] = r / beta
-        steps = 0
+        steps, y = 0, None
         for j in range(m):
             w = apply_a(V[j])
             # Classical Gram-Schmidt applied twice: stable and GPU friendly.
@@ -50,23 +52,15 @@ def gmres(apply_a, b, x0=None, rtol=1e-5, restart=100, maxiter=500, xp=np):
             w = w - basis.T @ h
             correction = (w.conj() @ basis.T).conj()
             w = w - basis.T @ correction
-            h = h + correction
-            H[: j + 1, j] = np.asarray(h.get() if hasattr(h, "get") else h)
-            H[j + 1, j] = float(xp.linalg.norm(w))
-            if H[j + 1, j] > 0:
-                V[j + 1] = w / H[j + 1, j]
-            for i in range(j):
-                upper = cs[i] * H[i, j] + sn[i] * H[i + 1, j]
-                H[i + 1, j] = -np.conj(sn[i]) * H[i, j] + cs[i] * H[i + 1, j]
-                H[i, j] = upper
-            cs[j], sn[j] = _givens(H[j, j], H[j + 1, j])
-            H[j, j] = cs[j] * H[j, j] + sn[j] * H[j + 1, j]
-            H[j + 1, j] = 0.0
-            g[j + 1] = -np.conj(sn[j]) * g[j]
-            g[j] = cs[j] * g[j]
-            steps = j + 1
-            total += 1
-            if abs(g[j + 1]) <= rtol * b_norm or total >= maxiter or H[j, j] == 0:
-                break
-        y = np.linalg.solve(np.triu(H[:steps, :steps]), g[:steps])
+            norm = xp.linalg.norm(w)
+            H[: j + 1, j] = h + correction
+            H[j + 1, j] = norm
+            V[j + 1] = w / xp.where(norm > 0, norm, 1)
+            steps, total = j + 1, total + 1
+            if steps % check_every == 0 or steps == m or total >= maxiter:
+                Hk = H[: steps + 1, :steps]
+                Hk = Hk.get() if hasattr(Hk, "get") else np.asarray(Hk)
+                y, estimate = _least_squares(Hk, beta)
+                if estimate <= rtol * b_norm or total >= maxiter or Hk[steps, steps - 1] == 0:
+                    break
         x = x + V[:steps].T @ xp.asarray(y, dtype=b.dtype)

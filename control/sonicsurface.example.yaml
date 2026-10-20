@@ -4,6 +4,9 @@ name: "sonicsurface-local"
 serial:
   port: "COM4"
   baudrate: 230400
+  # 写超时后重开串口的等待秒数：Arduino 转发会在打开串口时复位（约 2 秒），
+  # USB 转 TTL 适配器不会复位，可改为 0.2。
+  reopen_settle_s: 2.0
 
 # sonicsurface: 使用官方 SonicSurface.py 提供的 16x16 网格到 FPGA 通道映射。
 # identity: 输入数组下标直接对应 FPGA 通道。也可填写 0..255 的自定义完整排列。
