@@ -74,8 +74,14 @@ def obstacle_surface(obstacle, element_size):
             np.asarray(obstacle.get("rotation_deg", (0.0, 0.0, 0.0)), float),
             float(obstacle.get("scale", 1.0)),
         )
+        if obstacle.get("remesh", True) is False:
+            return oriented_arrays(surface)
         return oriented_arrays(remesh(surface, element_size))
-    raise ValueError(f"bem backend supports sphere and mesh obstacles, got {kind!r}")
+    if kind in {"reflector", "reflector_plate", "rigid_plate"}:
+        from algorithm.bem.reflectors import reflector_from_config
+
+        return reflector_from_config(obstacle, element_size)
+    raise ValueError(f"bem backend supports sphere, mesh and reflector obstacles, got {kind!r}")
 
 
 class BemSceneSolver:

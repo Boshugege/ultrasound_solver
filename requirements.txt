@@ -4,6 +4,9 @@ scipy>=1.10.0
 matplotlib>=3.7.0
 pyvista>=0.40.0
 pyacvd>=0.3.0
+smplx>=0.1.28
+trimesh>=5.2.0
+chumpy==0.70
 warp-lang>=1.0.0
 cupy-cuda12x[ctk]>=14.0.0
 nvmath-python[cu12]>=1.0.0

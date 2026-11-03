@@ -92,6 +92,7 @@ python src/algorithm/visualizer.py outputs/phase_oblique_reflecting_x_16x16/resu
 - [`docs/GRADIENT_DERIVATION.html`](docs/GRADIENT_DERIVATION.html)：振幅 loss 导数、相位 VJP、PDE 伴随梯度和有限差分验证。
 - [`docs/SOLVER_ARCHITECTURE.html`](docs/SOLVER_ARCHITECTURE.html)：求解器架构和模块边界。
 - [`docs/BEM_REALTIME_FOCUSING.md`](docs/BEM_REALTIME_FOCUSING.md)：刚性障碍物边界元后端、与 PDE 的对照验证和实时聚焦。
+- [`docs/SOLVER_BACKENDS_GROUP_MEETING.md`](docs/SOLVER_BACKENDS_GROUP_MEETING.md)：BEM 组会文档，介绍原理、相对 PDE 的优势、实测结果及适用范围。
 - [`algorithm_comparison/README.md`](algorithm_comparison/README.md)：已完成的 9 种算法对比、质量门槛统计和复现实验入口。
 - [`gradient_ablation/README.md`](gradient_ablation/README.md)：已完成的解析梯度更新器消融、质量门槛统计和复现实验入口。
 - [`src/hardware/README.md`](src/hardware/README.md)：Ultraino/AcousticField 标定结果与本地 S/C 硬件服务的接入方式。

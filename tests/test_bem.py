@@ -55,6 +55,54 @@ class ImageGroupTests(unittest.TestCase):
             image_group([(0, 0.0), (0, 0.16)])
 
 
+class ReflectorMeshTests(unittest.TestCase):
+    def test_thin_box_reflector_is_closed_and_outward(self):
+        from algorithm.bem.reflectors import thin_box_reflector
+
+        center = np.array([0.03, 0.02, 0.04])
+        vertices, faces = thin_box_reflector(
+            center=center,
+            normal=[1.0, 1.0, 0.5],
+            tangent=[1.0, -1.0, 0.0],
+            size=[0.04, 0.02],
+            thickness=0.003,
+            max_edge=0.01,
+        )
+        self.assertEqual(vertices.shape[1], 3)
+        self.assertEqual(faces.shape[1], 3)
+        self.assertGreater(len(faces), 12)
+
+        edges = {}
+        for face in faces:
+            for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+                key = tuple(sorted((int(a), int(b))))
+                edges[key] = edges.get(key, 0) + 1
+        self.assertTrue(edges)
+        self.assertTrue(all(count == 2 for count in edges.values()))
+
+        tri = vertices[faces]
+        normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        outward = ((tri.mean(axis=1) - center) * normals).sum(axis=1)
+        self.assertGreater(outward.min(), 0.0)
+
+    def test_reflector_obstacle_surface_config(self):
+        from algorithm.bem.scene_solver import obstacle_surface
+
+        vertices, faces = obstacle_surface(
+            {
+                "type": "reflector",
+                "center_m": [0.025, 0.025, 0.04],
+                "normal": [0.0, 1.0, 1.0],
+                "size_m": [0.03, 0.02],
+                "thickness_m": 0.002,
+            },
+            element_size=0.01,
+        )
+        self.assertEqual(vertices.shape[1], 3)
+        self.assertEqual(faces.shape[1], 3)
+        self.assertGreater(len(faces), 0)
+
+
 @unittest.skipUnless(GPU, "cupy not installed")
 class AccuracyTests(unittest.TestCase):
     def test_rigid_sphere_matches_series(self):
@@ -87,6 +135,36 @@ class AccuracyTests(unittest.TestCase):
 
 @unittest.skipUnless(GPU, "cupy not installed")
 class SceneSolverTests(unittest.TestCase):
+    def test_finite_reflector_changes_target_response(self):
+        from algorithm.bem.scene_solver import BemSceneSolver
+
+        target = np.array([[0.025, 0.025, 0.035]])
+        empty = BemSceneSolver(small_config(grid=12))
+        reflector = BemSceneSolver(small_config(
+            [
+                {
+                    "type": "reflector",
+                    "center_m": [0.025, 0.037, 0.026],
+                    "normal": [0.0, -1.0, 0.2],
+                    "size_m": [0.032, 0.026],
+                    "thickness_m": 0.003,
+                    "element_size_m": 0.012,
+                }
+            ],
+            grid=12,
+        ))
+        try:
+            self.assertEqual(empty.bem.n, 0)
+            self.assertGreater(reflector.bem.n, 0)
+            direct = empty.target_response(target)[0]
+            reflected = reflector.target_response(target)[0]
+            change = np.linalg.norm(reflected - direct) / np.linalg.norm(direct)
+            self.assertGreater(change, 1e-3)
+            self.assertTrue(np.isfinite(reflected).all())
+        finally:
+            empty.close()
+            reflector.close()
+
     def test_basis_direct_target_response_and_realtime_agree(self):
         from algorithm.bem.realtime import FocusSession
         from algorithm.bem.scene_solver import BemSceneSolver
