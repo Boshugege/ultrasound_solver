@@ -28,7 +28,7 @@ import warnings
 import cupy as cp
 import numpy as np
 
-from algorithm.bem.realtime import Apertures, aperture_response
+from algorithm.bem.realtime import Apertures, aperture_responses
 from algorithm.bem.solver import RigidBEM, aperture_sources, icosphere
 from algorithm.physics.conservative_helmholtz import FACES, boundary_type
 from algorithm.physics.transducer_array import TransducerArray
@@ -152,11 +152,15 @@ class BemSceneSolver:
 
     def target_response(self, points):
         """Exact responses (points x transducers) at the configured amplitudes, by
-        reciprocity: one BEM solve per point (none without obstacles)."""
+        reciprocity: one surface solve per point (none without obstacles); the points
+        share one matrix factorization and one aperture matrix (``aperture_responses``)."""
         points = np.atleast_2d(np.asarray(points, float))
-        rows = [cp.asnumpy(aperture_response(self.bem, p, self._direct, self._scattered, self.rtol)[0])
-                for p in points]
-        return np.array(rows) * self.transducers.amplitudes[None, :]
+        rows, infos = aperture_responses(self.bem, points, self._direct, self._scattered, self.rtol)
+        failed = sum(1 for info in infos if info is not None and not info.converged)
+        if failed:
+            warnings.warn(f"BEM solve did not reach rtol {self.rtol:g} for {failed} of {len(points)} "
+                          f"target points", RuntimeWarning)
+        return cp.asnumpy(rows) * self.transducers.amplitudes[None, :]
 
     def field_at(self, points, phases=None):
         phases = self.transducers.phases if phases is None else np.asarray(phases, float)
@@ -254,11 +258,13 @@ class BemSceneSolver:
         emitters = np.asarray(emitters)
         U = cp.zeros((bem.n, weight_columns.shape[1]), dtype=cp.complex64)
         if bem.n:
-            for column in range(weight_columns.shape[1]):
-                b = sum(self._surface_rhs(e, w) for e, w in zip(emitters, weight_columns[:, column]) if w != 0)
-                U[:, column], info = bem.solve(b, rtol=self.rtol)
-                if not info.converged:
-                    raise RuntimeError(f"BEM GMRES did not converge ({info.iterations} iterations)")
+            B = cp.stack([sum((self._surface_rhs(e, w) for e, w in zip(emitters, column) if w != 0),
+                              cp.zeros(bem.n, dtype=cp.complex64)) for column in weight_columns.T], axis=1)
+            U, infos = bem.solve_many(B, rtol=self.rtol)
+            failed = [info for info in infos if not info.converged]
+            if failed:
+                raise RuntimeError(f"BEM GMRES did not converge for {len(failed)} of {len(infos)} columns "
+                                   f"({max(info.iterations for info in failed)} iterations)")
         if self._grid is None:
             self._grid = self._grid_points()
         fields = np.empty((self.total_dofs, weight_columns.shape[1]), dtype=np.complex128)

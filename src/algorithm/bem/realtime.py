@@ -19,6 +19,7 @@ import time
 import cupy as cp
 import numpy as np
 
+from algorithm.bem import kernels
 from algorithm.bem.solver import RigidBEM, aperture_sources
 
 
@@ -33,6 +34,39 @@ class Apertures:
 
     def integrate(self, values):
         return (values * self.weights).reshape(self.count, self.per_aperture).sum(axis=1)
+
+    def scattered_matrix(self, bem, chunk=8192):
+        """(apertures x elements) complex64 matrix P with P @ u the aperture integrals of
+        the scattered field of the surface density u (same quadrature as ``scattered``)."""
+        per = self.per_aperture
+        step = max(1, chunk // per)
+        weights = self.weights.astype(cp.float32).reshape(self.count, per)
+        P = cp.empty((self.count, bem.n), dtype=cp.complex64)
+        for first in range(0, self.count, step):
+            last = min(self.count, first + step)
+            D = kernels.evaluation_matrix(bem.device, self.points[first * per:last * per], bem.k, bem.images)
+            P[first:last] = cp.matmul(weights[first:last, None, :], D.reshape(last - first, per, bem.n))[:, 0]
+        return P
+
+
+def aperture_responses(bem, targets, direct, scattered, rtol, chunk=512):
+    """``aperture_response`` rows for many targets (targets x apertures, complex128) and
+    one SolveInfo per target. All targets share one aperture matrix for the scattered
+    term and one multi-column surface solve (``RigidBEM.solve_many``)."""
+    targets = np.atleast_2d(np.asarray(targets, float))
+    rows = cp.stack([direct.integrate(bem.point_field(direct.points, t)) for t in targets]) \
+        if len(targets) else cp.zeros((0, direct.count), dtype=cp.complex128)
+    if bem.n == 0:
+        return rows, [None] * len(targets)
+    P = scattered.scattered_matrix(bem)
+    infos = []
+    for start in range(0, len(targets), chunk):
+        block = targets[start:start + chunk]
+        B = cp.stack([bem.rhs(*bem.point_source(bem.geo["centroids"], t)) for t in block], axis=1)
+        U, block_infos = bem.solve_many(B, rtol=rtol)
+        rows[start:start + len(block)] += (P @ U).T
+        infos += block_infos
+    return rows, infos
 
 
 def aperture_response(bem, target, direct, scattered, rtol, x0=None, incident=None, timings=None):

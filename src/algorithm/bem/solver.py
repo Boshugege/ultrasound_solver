@@ -77,6 +77,10 @@ def self_hypersingular(tri, k: float, angular=16, radial=8, xp=np):
 
 
 HALF_SCALE = 1024.0  # matrix entries are O(1); keeps small entries out of float16 subnormals
+# solve_many factors the matrix for at least n / LU_ELEMENTS_PER_COLUMN right-hand sides. RTX
+# 4090, hand with n = 24,800 elements: factorization and 128 solves < 1.5 s, unpreconditioned
+# GMRES 0.27-0.47 s per column (rtol 1e-2 to 1e-4), so the LU pays from about 3-5 columns.
+LU_ELEMENTS_PER_COLUMN = 4000
 
 
 @dataclass
@@ -175,6 +179,7 @@ class RigidBEM:
         # GMRES: half the memory traffic per product (for rtol >= 1e-3).
         self.half_precision = half_precision
         self._half = None
+        self._lu = None
         self._assembled = False
         self.planes = tuple(planes)
         self.images = image_group(self.planes)
@@ -207,6 +212,7 @@ class RigidBEM:
             self.A_obstacle = None
             self.preconditioner = None
         self.A = None
+        self._lu = None
         self._assembled = False
         cp.cuda.Stream.null.synchronize()
         self.geometry_seconds = time.perf_counter() - started
@@ -222,6 +228,7 @@ class RigidBEM:
         started = time.perf_counter()
         half = HALF_SCALE if self.half_precision else None
         previous = self._half if half else getattr(self, "_buffer", None)
+        self._lu = None
         if self.n == 0:
             self.A, self._half = cp.zeros((0, 0), dtype=cp.complex64), None
         elif len(self.images[0]) == 1:
@@ -312,6 +319,58 @@ class RigidBEM:
             solution = P.solve(result.solution)
         cp.cuda.Stream.null.synchronize()
         return solution, SolveInfo(result.iterations, time.perf_counter() - started, result.converged)
+
+    def solve_many(self, B, rtol=1e-5, method="auto"):
+        """Solve for every column of B (n, m) to the tolerance of ``solve``; returns X and
+        one SolveInfo per column.
+
+        ``"lu"`` factors the complex64 matrix once (kept until the next assembly) and
+        solves all columns together, refines once with the same factors, and runs GMRES
+        from that solution for any column whose true residual is still above ``rtol``.
+        ``"gmres"`` calls ``solve`` column by column. ``"auto"`` uses the LU when the
+        matrix is stored in complex64 and is already factored, or when there are enough
+        columns (``LU_ELEMENTS_PER_COLUMN``) and the factors fit in free GPU memory."""
+        if not self._assembled:
+            self.assemble()
+        B = cp.asarray(B, dtype=cp.complex64).reshape(self.n, -1)
+        m = B.shape[1]
+        if self.n == 0:
+            return B.copy(), [SolveInfo(0, 0.0, True)] * m
+        if method == "auto":
+            method = "lu" if self.A is not None and (
+                self._lu is not None or (m * LU_ELEMENTS_PER_COLUMN >= self.n and self._factors_fit())) \
+                else "gmres"
+        if method == "gmres" or m == 0:
+            pairs = [self.solve(B[:, j], rtol=rtol) for j in range(m)]
+            X = cp.stack([x for x, _ in pairs], axis=1) if m else cp.zeros_like(B)
+            return X, [info for _, info in pairs]
+        if self.A is None:
+            raise ValueError("solve_many(method='lu') needs the complex64 matrix (half_precision=False)")
+        from cupyx.scipy.linalg import lu_factor, lu_solve
+
+        cp.cuda.Stream.null.synchronize()
+        started = time.perf_counter()
+        if self._lu is None:
+            self._lu = lu_factor(self.A, check_finite=False)
+        X = lu_solve(self._lu, B, check_finite=False)
+        norms = cp.linalg.norm(B, axis=0)
+        norms = cp.where(norms > 0, norms, 1)
+        for refinement in range(2):
+            R = B - self.A @ X
+            relative = cp.asnumpy(cp.linalg.norm(R, axis=0) / norms)
+            if refinement or (relative <= rtol).all():
+                break
+            X += lu_solve(self._lu, R, check_finite=False)
+        cp.cuda.Stream.null.synchronize()
+        seconds = (time.perf_counter() - started) / m
+        infos = [SolveInfo(0, seconds, True)] * m
+        for j in np.flatnonzero(relative > rtol):
+            X[:, j], infos[j] = self.solve(B[:, j], x0=X[:, j], rtol=rtol)
+        return X, infos
+
+    def _factors_fit(self):
+        free = cp.cuda.runtime.memGetInfo()[0] + cp.get_default_memory_pool().free_bytes()
+        return 1.25 * 8 * self.n * self.n < free
 
     def scattered(self, points, u):
         """Scattered field at points for one surface density ``u``."""

@@ -119,6 +119,26 @@ class AccuracyTests(unittest.TestCase):
         exact = rigid_sphere_point_source(probe, source, (0, 0, 0), 0.02, K)
         self.assertLess(np.linalg.norm(total - exact) / np.linalg.norm(exact), 0.02)
 
+    def test_solve_many_matches_column_solves(self):
+        import cupy as cp
+        from algorithm.bem.solver import RigidBEM, icosphere
+
+        bem = RigidBEM(*icosphere(0.01, 3, center=(0.0, 0.0, 0.03)), k=K)
+        sources = np.array([[0.0, 0.0, 0.07], [0.02, -0.01, 0.05], [-0.03, 0.01, 0.02]])
+        B = cp.stack([bem.rhs(*bem.point_source(bem.geo["centroids"], s)) for s in sources], axis=1)
+        for method in ("auto", "gmres", "lu"):
+            X, infos = bem.solve_many(B, rtol=1e-6, method=method)
+            self.assertEqual(len(infos), 3)
+            self.assertTrue(all(info.converged for info in infos))
+            residual = cp.linalg.norm(B - bem.A @ X, axis=0) / cp.linalg.norm(B, axis=0)
+            self.assertLess(float(residual.max()), 1e-6)
+            if method == "auto":  # 3 columns x LU_ELEMENTS_PER_COLUMN >= 1280 elements: factored
+                self.assertIsNotNone(bem._lu)
+        bem.assemble()
+        self.assertIsNone(bem._lu)
+        x, _ = bem.solve(B[:, 1], rtol=1e-6)
+        np.testing.assert_allclose(cp.asnumpy(X[:, 1]), cp.asnumpy(x), atol=1e-5 * float(abs(x).max()))
+
     def test_source_is_upstream_sinc_aperture(self):
         import cupy as cp
         from algorithm.bem.solver import RigidBEM, aperture_sources
@@ -201,6 +221,19 @@ class SceneSolverTests(unittest.TestCase):
         quick = fast.response_row(point)
         self.assertGreater(abs(np.sum(row * np.exp(-1j * np.angle(quick)))) / np.abs(row).sum(), 0.9999)
         basis.close()
+
+    def test_target_response_rows_match_one_point_solves(self):
+        from algorithm.bem.realtime import aperture_response
+        from algorithm.bem.scene_solver import BemSceneSolver
+
+        solver = BemSceneSolver(small_config([SPHERE], grid=12))
+        points = np.array([[0.025, 0.025, 0.044], [0.01, 0.04, 0.03], [0.04, 0.012, 0.012], [0.03, 0.03, 0.04]])
+        rows = solver.target_response(points)
+        for point, row in zip(points, rows):
+            single = aperture_response(solver.bem, point, solver._direct, solver._scattered, 1e-6)[0]
+            single = single.get() * solver.transducers.amplitudes
+            np.testing.assert_allclose(row, single, rtol=0, atol=1e-5 * np.abs(single).max())
+        solver.close()
 
     def test_unsupported_scenes_raise(self):
         from algorithm.bem.scene_solver import BemSceneSolver
