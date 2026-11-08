@@ -49,7 +49,7 @@ __device__ void point_kernel(const float* x, const float* nx, const float* y,
     // kr is only known to float precision anyway; reduce to [-pi, pi] and use the
     // hardware sin/cos (as accurate as sinf/cosf here, several times faster).
     __sincosf(kr - 6.28318530718f * rintf(kr * 0.159154943092f), &s, &c);
-    float scale = 1.0 / (4.0 * PI * r * r);
+    float scale = 1.0f / (4.0f * PI_F * r * r);
     float gp_r = (-c - s * kr) * scale, gp_i = (c * kr - s) * scale;  // G'
     float dny = (rx * ny[0] + ry * ny[1] + rz * ny[2]) / r;
     acc[0] += w * gp_r * dny;
