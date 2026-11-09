@@ -5,8 +5,9 @@ at 64-256 targets, on the native MANO mesh (1552 faces, remesh off), with the 'p
 (GMRES rtol 1e-2) or 'high' (rtol 1e-4, finer aperture quadrature) settings. The MANO
 files need a licence, so the hand here is the repository's 17 cm hand
 (src/examples/bem_hand_16x16.yaml) remeshed into regular triangles with MANO's face count
-and placed like the dataset's hands; --mesh takes any closed surface in scene coordinates instead (for
-example a MANO scene mesh written by the dataset generator).
+and placed like the dataset's hands; --mano N takes the dataset's own first N hands instead
+(MANO with FreiHAND poses, needs models/mano and data/freihand/training_mano.json), --mesh
+any closed surface in scene coordinates.
 
 speed       one geometry: one surface solve per target point (target_response before
             the change, kept as ``aperture_response``) against target_response (one
@@ -16,8 +17,11 @@ resolution  labels on the native mesh and on the same polyhedron with 4x and 16x
             elements (linear subdivision: same geometry, smaller elements), compared with
             a reference (16x, tight solve, fine quadrature): relative error of the
             response rows and the focus efficiency of each label's phases in the
-            reference, for targets anywhere in the workspace and 5-15 mm from the hand
-Usage: teacher_labels.py speed|resolution [--targets 64] [--geometries 3] [--mesh file.vtk]
+            reference, for targets anywhere in the workspace and 5-15 mm from the hand;
+            with --uniform N..., also near-uniform remeshes at lambda / N (pyacvd), the
+            finest of which is then the reference
+Usage: teacher_labels.py speed|resolution [--targets 64] [--geometries 3 | --mano 3 | --mesh file.vtk]
+                         [--uniform 3 4 5]
 """
 
 import argparse
@@ -50,6 +54,7 @@ TEACHERS = {  # generate_mano_bem_dataset.py (_teacher_config) and run_ok_hand_b
 }
 WORKSPACE = (np.array([0.020, 0.020, 0.025]), np.array([0.160, 0.160, 0.145]))  # dataset targets
 CLEARANCE = 0.005
+WAVELENGTH = 346.0 / 40000.0
 
 
 def synced():
@@ -65,10 +70,27 @@ def polydata(vertices, faces):
     return pv.PolyData(vertices, np.hstack([np.full((len(faces), 1), 3), faces]).ravel())
 
 
+def mano_hands(count):
+    """The first ``count`` hand surfaces of generate_mano_bem_dataset.py (its default seed and
+    10 shapes): MANO with FreiHAND poses, placed and wrist-capped exactly as the dataset."""
+    sys.path.insert(0, str(ROOT / "scripts" / "hand_dataset"))
+    import generate_mano_bem_dataset as dataset
+    from algorithm.hand.mano_model import MANOHandModel
+
+    values = dataset._load_freihand(ROOT / "data" / "freihand" / "training_mano.json")
+    options = argparse.Namespace(seed=20261102, num_geometries=count, targets_per_geometry=64, num_shapes=10,
+                                 teacher_profile="high", target_clearance_m=0.005)
+    manifest = dataset._manifest(options, values, OUT / "mano")
+    model = MANOHandModel(ROOT / "models" / "mano", hand="right", device="cpu")
+    return [dataset._make_geometry(model, values, manifest, i)["mesh"] for i in range(count)]
+
+
 def hands(cfg, args, rng):
     """Closed hand surfaces in scene coordinates, one per geometry."""
     if args.mesh:
         return [_load_closed_surface(Path(args.mesh))]
+    if args.mano:
+        return mano_hands(args.mano)
     obstacle = cfg.obstacles[0]
     source = _load_closed_surface((CONFIG.parent / obstacle["file"]).resolve())
     out = []
@@ -81,6 +103,13 @@ def hands(cfg, args, rng):
         # regular triangles with MANO's face count (remesh makes ~2 faces per cluster point)
         out.append(remesh(placed, np.sqrt(2.0 * placed.area / (0.866 * MANO_FACES))))
     return out
+
+
+def densified(surface, element_size):
+    """Same surface with every edge shorter than element_size / 2 (adaptive linear
+    subdivision). pyacvd needs evenly spread input points: on the native MANO mesh (edges
+    up to 48 mm at the wrist cap) it often returns a surface that is not closed."""
+    return surface.subdivide_adaptive(max_edge_len=0.5 * element_size).triangulate().clean()
 
 
 def refined(surface, levels):
@@ -184,31 +213,46 @@ def resolution(args):
         print(f"geometry {g}: hand {describe(*meshes[0])}; lowest point {surface.points[:, 2].min() * 1e3:.0f} mm; "
               f"{(~near).sum()} workspace + {near.sum()} near targets", flush=True)
 
-        def labels(levels, direct, scattered, rtol, single=False):
+        def labels(mesh, direct, scattered, rtol, single=False):
             release()
-            bem = RigidBEM(*meshes[levels], k=k)
+            started = synced()
+            bem = RigidBEM(*mesh, k=k)
             bem.assemble()
             direct, scattered = Apertures(centers, diameter, direct), Apertures(centers, diameter, scattered)
             if single:  # the dataset's per-point GMRES (pilot labels)
                 rows = cp.stack([aperture_response(bem, p, direct, scattered, rtol)[0] for p in points])
-            else:
-                rows, _ = aperture_responses(bem, points, direct, scattered, rtol)
+            else:  # the aperture matrix is built in small pieces: the reference matrix is large
+                rows, _ = aperture_responses(bem, points, direct, scattered, rtol, matrix_chunk=2048)
             rows = cp.asnumpy(rows)
+            print(f"    {describe(*mesh)}: {synced() - started:.1f} s", flush=True)
             del bem
             return rows
 
-        started = synced()
-        reference = labels(2, (32, 128), (8, 32), 1e-6)
-        print(f"  reference {describe(*meshes[2])}: {synced() - started:.1f} s", flush=True)
+        uniform = {}
+        for n in args.uniform:  # near-uniform triangles with edges ~ lambda / n (pyacvd)
+            started = time.perf_counter()
+            uniform[n] = oriented_arrays(remesh(densified(surface, WAVELENGTH / n), WAVELENGTH / n))
+            print(f"  remeshed at lambda/{n:g}: {len(uniform[n][1])} elements, {time.perf_counter() - started:.1f} s",
+                  flush=True)
+        if uniform:
+            finest = max(uniform)
+            print(f"  reference: lambda/{finest:g} remesh", flush=True)
+            reference = labels(uniform.pop(finest), (32, 128), (8, 32), 1e-5)
+        else:
+            print("  reference: 16x elements", flush=True)
+            reference = labels(meshes[2], (32, 128), (8, 32), 1e-6)
         empty = RigidBEM(np.zeros((0, 3)), np.zeros((0, 3), np.int64), k=k)
         free = cp.asnumpy(aperture_responses(empty, points, Apertures(centers, diameter, (32, 128)),
                                              None, 1e-6)[0])
-        variants = {
-            "no hand (direct field only)": free,
-            "native, pilot (GMRES 1e-2)": labels(0, (8, 32), (4, 16), 1e-2, single=True),
-            "native, high": labels(0, (16, 64), (8, 32), 1e-4),
-            "4x elements, high": labels(1, (16, 64), (8, 32), 1e-4),
-        }
+        variants = {"no hand (direct field only)": free}
+        if not args.uniform:
+            variants["native, pilot (GMRES 1e-2)"] = labels(meshes[0], (8, 32), (4, 16), 1e-2, single=True)
+        variants["native, high"] = labels(meshes[0], (16, 64), (8, 32), 1e-4)
+        variants["4x elements, high"] = labels(meshes[1], (16, 64), (8, 32), 1e-4)
+        if args.uniform:
+            variants["16x elements, high"] = labels(meshes[2], (16, 64), (8, 32), 1e-4)
+        for n, mesh in sorted(uniform.items()):
+            variants[f"lambda/{n:g} remesh, high"] = labels(mesh, (16, 64), (8, 32), 1e-4)
         for name, rows in variants.items():
             error = np.linalg.norm(rows - reference, axis=1) / np.linalg.norm(reference, axis=1)
             eta = efficiency(reference, rows)
@@ -217,7 +261,7 @@ def resolution(args):
                 f"{label}: error median {np.median(error[m]):.1%} max {error[m].max():.1%}, focus median "
                 f"{np.median(eta[m]):.2%} min {eta[m].min():.2%}" for label, m in (("workspace", ~near), ("near", near))),
                 flush=True)
-    if len(results) and args.geometries > 1 and not args.mesh:
+    if len(results) and (args.mano or args.geometries) > 1 and not args.mesh:
         print("all geometries:")
         for name, parts in results.items():
             error, eta, near = (np.concatenate(v) for v in zip(*parts))
@@ -233,6 +277,11 @@ def main():
     parser.add_argument("--targets", type=int, default=64)
     parser.add_argument("--geometries", type=int, default=3)
     parser.add_argument("--mesh", help="closed surface in scene coordinates instead of the remeshed hand")
+    parser.add_argument("--mano", type=int, default=0,
+                        help="the first N hands of generate_mano_bem_dataset.py (needs models/mano and "
+                             "data/freihand/training_mano.json)")
+    parser.add_argument("--uniform", type=float, nargs="*", default=[],
+                        help="resolution: also remesh at lambda / N for each N; the finest is the reference")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     {"speed": speed, "resolution": resolution}[args.command](args)

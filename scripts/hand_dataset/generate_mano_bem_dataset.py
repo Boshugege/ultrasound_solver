@@ -40,6 +40,8 @@ from run_ok_hand_bem_demo import _build_config, _write_yaml  # noqa: E402
 
 
 SCHEMA_VERSION = 1
+# Teacher surface: edges of wavelength / N (bem_study/teacher_labels.py resolution --mano)
+TEACHER_ELEMENTS_PER_WAVELENGTH = 4.0
 TARGET_CATEGORIES = {"uniform": 0, "near_hand": 1, "trajectory": 2}
 WORKSPACE_LO = np.array([0.020, 0.020, 0.025], dtype=np.float64)
 WORKSPACE_HI = np.array([0.160, 0.160, 0.145], dtype=np.float64)
@@ -55,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-shapes", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20261102)
     parser.add_argument("--teacher-profile", choices=["pilot", "high"], default="pilot")
+    parser.add_argument("--elements-per-wavelength", type=float, default=TEACHER_ELEMENTS_PER_WAVELENGTH,
+                        help="Teacher surface: remesh the hand into near-uniform triangles with edges of "
+                             "wavelength / N; 0 keeps the native MANO mesh (edges ~ 1 wavelength, labels "
+                             "far from converged, see bem_study/teacher_labels.py)")
     parser.add_argument("--target-clearance-m", type=float, default=0.005)
     parser.add_argument("--max-new", type=int, default=0,
                         help="Stop after this many new geometries; 0 processes all missing geometries")
@@ -156,12 +162,16 @@ def _manifest(args: argparse.Namespace, values: np.ndarray, output_dir: Path) ->
             "targets_per_geometry": args.targets_per_geometry,
             "num_shapes": args.num_shapes,
             "teacher_profile": args.teacher_profile,
+            "teacher_elements_per_wavelength": args.elements_per_wavelength,
             "target_clearance_m": args.target_clearance_m,
         }
+        # datasets written before the option existed used the native mesh (0)
+        stored = {key: data.get(key, 0.0 if key == "teacher_elements_per_wavelength" else None)
+                  for key in expected}
         mismatches = {
-            key: (data.get(key), value)
+            key: (stored[key], value)
             for key, value in expected.items()
-            if data.get(key) != value
+            if stored[key] != value
         }
         if mismatches:
             raise ValueError(f"Existing dataset configuration differs: {mismatches}")
@@ -185,6 +195,7 @@ def _manifest(args: argparse.Namespace, values: np.ndarray, output_dir: Path) ->
         "shape_source_indices": shape_indices.tolist(),
         "shape_splits": _shape_splits(args.num_shapes, rng),
         "teacher_profile": args.teacher_profile,
+        "teacher_elements_per_wavelength": args.elements_per_wavelength,
         "target_clearance_m": args.target_clearance_m,
         "target_categories": TARGET_CATEGORIES,
         "input_schema": {
@@ -355,11 +366,24 @@ def _teacher_config(
     first_target: np.ndarray,
     geometry_dir: Path,
     profile: str,
+    elements_per_wavelength: float = 0.0,
 ) -> Path:
     points = np.asarray(mesh.points, dtype=np.float64)
     mesh_center = 0.5 * (points.min(axis=0) + points.max(axis=0))
     raw = _build_config(mesh_file.resolve(), mesh_center, first_target, geometry_dir)
-    raw["obstacles"][0]["remesh"] = False
+    # The native MANO mesh (1552 faces, edges ~8.5 mm ~ one wavelength) is far too coarse
+    # for constant-element BEM; BemSceneSolver remeshes it at wavelength / N instead.
+    raw["obstacles"][0]["remesh"] = elements_per_wavelength > 0
+    if elements_per_wavelength > 0:
+        raw["solver"]["bem_elements_per_wavelength"] = float(elements_per_wavelength)
+        wavelength = raw["physics"]["sound_speed"] / raw["transducer_specs"]["frequency"]
+        # pyacvd (the remesher) needs evenly spread input points; on the native mesh, whose
+        # wrist cap has edges up to ~48 mm, it often returns a surface that is not closed.
+        # Splitting every edge longer than half an element first keeps the geometry.
+        dense = mesh.subdivide_adaptive(max_edge_len=0.5 * wavelength / elements_per_wavelength)
+        teacher_file = geometry_dir / "hand_teacher.vtk"
+        dense.triangulate().clean().save(teacher_file)
+        raw["obstacles"][0]["file"] = str(teacher_file.resolve())
     if profile == "high":
         raw["solver"].update({
             "bem_rtol": 1.0e-4,
@@ -555,6 +579,7 @@ def main() -> None:
                 targets[0],
                 geometry_dir,
                 args.teacher_profile,
+                args.elements_per_wavelength,
             )
             solver = BemSceneSolver(SimulationConfig.from_yaml(str(cfg_path)))
             label_started = time.perf_counter()

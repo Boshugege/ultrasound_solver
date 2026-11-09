@@ -49,16 +49,17 @@ class Apertures:
         return P
 
 
-def aperture_responses(bem, targets, direct, scattered, rtol, chunk=512):
+def aperture_responses(bem, targets, direct, scattered, rtol, chunk=512, matrix_chunk=8192):
     """``aperture_response`` rows for many targets (targets x apertures, complex128) and
     one SolveInfo per target. All targets share one aperture matrix for the scattered
-    term and one multi-column surface solve (``RigidBEM.solve_many``)."""
+    term and one multi-column surface solve (``RigidBEM.solve_many``); ``matrix_chunk``
+    quadrature points are evaluated at a time while building the aperture matrix."""
     targets = np.atleast_2d(np.asarray(targets, float))
     rows = cp.stack([direct.integrate(bem.point_field(direct.points, t)) for t in targets]) \
         if len(targets) else cp.zeros((0, direct.count), dtype=cp.complex128)
     if bem.n == 0:
         return rows, [None] * len(targets)
-    P = scattered.scattered_matrix(bem)
+    P = scattered.scattered_matrix(bem, matrix_chunk)
     infos = []
     for start in range(0, len(targets), chunk):
         block = targets[start:start + chunk]
