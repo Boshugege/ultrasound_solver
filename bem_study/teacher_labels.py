@@ -78,8 +78,9 @@ def mano_hands(count):
     from algorithm.hand.mano_model import MANOHandModel
 
     values = dataset._load_freihand(ROOT / "data" / "freihand" / "training_mano.json")
+    # the manifest only selects the shapes here (this script meshes the hands itself)
     options = argparse.Namespace(seed=20261102, num_geometries=count, targets_per_geometry=64, num_shapes=10,
-                                 teacher_profile="high", target_clearance_m=0.005)
+                                 teacher_profile="high", target_clearance_m=0.005, elements_per_wavelength=0.0)
     manifest = dataset._manifest(options, values, OUT / "mano")
     model = MANOHandModel(ROOT / "models" / "mano", hand="right", device="cpu")
     return [dataset._make_geometry(model, values, manifest, i)["mesh"] for i in range(count)]

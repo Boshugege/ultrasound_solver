@@ -367,6 +367,7 @@ def _teacher_config(
     geometry_dir: Path,
     profile: str,
     elements_per_wavelength: float = 0.0,
+    split_fraction: float = 0.5,
 ) -> Path:
     points = np.asarray(mesh.points, dtype=np.float64)
     mesh_center = 0.5 * (points.min(axis=0) + points.max(axis=0))
@@ -380,7 +381,7 @@ def _teacher_config(
         # pyacvd (the remesher) needs evenly spread input points; on the native mesh, whose
         # wrist cap has edges up to ~48 mm, it often returns a surface that is not closed.
         # Splitting every edge longer than half an element first keeps the geometry.
-        dense = mesh.subdivide_adaptive(max_edge_len=0.5 * wavelength / elements_per_wavelength)
+        dense = mesh.subdivide_adaptive(max_edge_len=split_fraction * wavelength / elements_per_wavelength)
         teacher_file = geometry_dir / "hand_teacher.vtk"
         dense.triangulate().clean().save(teacher_file)
         raw["obstacles"][0]["file"] = str(teacher_file.resolve())
@@ -573,15 +574,24 @@ def main() -> None:
             mesh = pv.read(mesh_file).extract_surface(
                 algorithm="dataset_surface"
             ).triangulate().clean()
-            cfg_path = _teacher_config(
-                mesh_file,
-                mesh,
-                targets[0],
-                geometry_dir,
-                args.teacher_profile,
-                args.elements_per_wavelength,
-            )
-            solver = BemSceneSolver(SimulationConfig.from_yaml(str(cfg_path)))
+            # ~0.1 % of the hands still remesh into a surface that is not closed; a finer
+            # split of the input changes the remesher's starting points and fixes them
+            for split_fraction in (0.5, 0.35, 0.25):
+                cfg_path = _teacher_config(
+                    mesh_file,
+                    mesh,
+                    targets[0],
+                    geometry_dir,
+                    args.teacher_profile,
+                    args.elements_per_wavelength,
+                    split_fraction,
+                )
+                try:
+                    solver = BemSceneSolver(SimulationConfig.from_yaml(str(cfg_path)))
+                    break
+                except ValueError as exc:
+                    if "not closed" not in str(exc) or split_fraction == 0.25:
+                        raise
             label_started = time.perf_counter()
             response = solver.target_response(targets)
             label_s = time.perf_counter() - label_started
